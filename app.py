@@ -214,7 +214,9 @@ async def callback(code: str):
         JWT_SECRET, algorithm="HS256",
     )
     redirect = RedirectResponse(FRONTEND_URL)
-    redirect.set_cookie("session", session_token, httponly=True, samesite="lax", max_age=60 * 60 * 24 * 7)
+    redirect.set_cookie(
+        "session", session_token, httponly=True, samesite="none", secure=True, max_age=60 * 60 * 24 * 7
+    )
     return redirect
 
 
