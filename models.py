@@ -41,6 +41,7 @@ class DutyFraction(Base):
     on_duty = Column(Integer, default=0)
     total = Column(Integer, default=0)
     hours_today = Column(Float, default=0.0)
+    channel_id = Column(String, nullable=True)  # Discord-Kanal-ID für Dienst-Embeds
 
 
 class Giveaway(Base):
