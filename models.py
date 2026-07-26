@@ -13,6 +13,7 @@ class User(Base):
     balance = Column(BigInteger, default=500)
     status = Column(String, default="offline")
     joined_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    on_duty_fraction = Column(String, nullable=True)  # Name der Fraktion, bei der aktuell im Dienst (oder None)
 
 
 class Transaction(Base):
