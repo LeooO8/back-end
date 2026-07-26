@@ -1,5 +1,5 @@
 import os
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 from models import Base
 
@@ -11,6 +11,15 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 def init_db():
     Base.metadata.create_all(bind=engine)
+    # Kleine, sichere Migration: neue Spalten an bestehenden Tabellen ergänzen,
+    # ohne bestehende Daten zu löschen (create_all legt nur neue Tabellen an,
+    # keine neuen Spalten an bereits existierenden).
+    with engine.connect() as conn:
+        try:
+            conn.execute(text("ALTER TABLE duty_fractions ADD COLUMN channel_id VARCHAR"))
+            conn.commit()
+        except Exception:
+            pass  # Spalte existiert schon oder Tabelle ist neu angelegt - beides okay
 
 
 def get_db():
