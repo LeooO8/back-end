@@ -13,6 +13,7 @@ import asyncio
 import httpx
 import jwt
 import discord
+from discord import app_commands
 from discord.ext import commands
 from fastapi import FastAPI, Depends, HTTPException, Response, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -65,67 +66,79 @@ def get_or_create_user(db, member: discord.Member) -> User:
 @bot.event
 async def on_ready():
     print(f"Bot eingeloggt als {bot.user}")
+    try:
+        if GUILD_ID:
+            guild = discord.Object(id=int(GUILD_ID))
+            bot.tree.copy_global_to(guild=guild)
+            synced = await bot.tree.sync(guild=guild)
+        else:
+            synced = await bot.tree.sync()
+        print(f"{len(synced)} Slash-Commands synchronisiert")
+    except Exception as e:
+        print(f"Fehler beim Synchronisieren der Slash-Commands: {e}")
 
 
-@bot.command(name="kontostand")
-async def balance_cmd(ctx: commands.Context):
+@bot.tree.command(name="kontostand", description="Zeigt deinen aktuellen Kontostand")
+async def balance_cmd(interaction: discord.Interaction):
     db = SessionLocal()
     try:
-        user = get_or_create_user(db, ctx.author)
-        await ctx.reply(f"💰 Dein Kontostand: **{user.balance:,} ₡**".replace(",", "."))
+        user = get_or_create_user(db, interaction.user)
+        await interaction.response.send_message(f"💰 Dein Kontostand: **{user.balance:,} ₡**".replace(",", "."))
     finally:
         db.close()
 
 
-@bot.command(name="ueberweisen", aliases=["überweisen"])
-async def transfer_cmd(ctx: commands.Context, empfaenger: discord.Member, betrag: int):
+@bot.tree.command(name="ueberweisen", description="Überweist Guthaben an ein anderes Mitglied")
+@app_commands.describe(empfaenger="An wen überwiesen werden soll", betrag="Wie viel überwiesen werden soll")
+async def transfer_cmd(interaction: discord.Interaction, empfaenger: discord.Member, betrag: int):
     if betrag <= 0:
-        return await ctx.reply("Der Betrag muss positiv sein.")
+        return await interaction.response.send_message("Der Betrag muss positiv sein.", ephemeral=True)
     db = SessionLocal()
     try:
-        sender = get_or_create_user(db, ctx.author)
+        sender = get_or_create_user(db, interaction.user)
         receiver = get_or_create_user(db, empfaenger)
         if sender.balance < betrag:
-            return await ctx.reply("❌ Nicht genug Guthaben.")
+            return await interaction.response.send_message("❌ Nicht genug Guthaben.", ephemeral=True)
         sender.balance -= betrag
         receiver.balance += betrag
         db.add(Transaction(from_user=sender.username, to_user=receiver.username, amount=betrag, type="Überweisung"))
         db.add(LogEntry(type="bank", text=f"{sender.username} überwies {betrag} ₡ an {receiver.username}"))
         db.commit()
-        await ctx.reply(f"✅ {betrag:,} ₡ an {empfaenger.mention} überwiesen.".replace(",", "."))
+        await interaction.response.send_message(f"✅ {betrag:,} ₡ an {empfaenger.mention} überwiesen.".replace(",", "."))
     finally:
         db.close()
 
 
-@bot.command(name="shop")
-async def shop_cmd(ctx: commands.Context):
+@bot.tree.command(name="shop", description="Zeigt alle Artikel im Shop")
+async def shop_cmd(interaction: discord.Interaction):
     db = SessionLocal()
     try:
         items = db.query(ShopItem).all()
         if not items:
-            return await ctx.reply("Der Shop ist noch leer.")
+            return await interaction.response.send_message("Der Shop ist noch leer.")
         text = "\n".join(f"**{i.name}** — {i.price:,} ₡".replace(",", ".") for i in items)
-        await ctx.reply(f"🛒 **Shop-Artikel:**\n{text}")
+        await interaction.response.send_message(f"🛒 **Shop-Artikel:**\n{text}")
     finally:
         db.close()
 
 
-@bot.command(name="kaufen")
-async def buy_cmd(ctx: commands.Context, *, artikelname: str):
+@bot.tree.command(name="kaufen", description="Kauft einen Artikel aus dem Shop")
+@app_commands.describe(artikel="Name des Artikels (oder ein Teil davon)")
+async def buy_cmd(interaction: discord.Interaction, artikel: str):
     db = SessionLocal()
     try:
-        item = db.query(ShopItem).filter(ShopItem.name.ilike(f"%{artikelname}%")).first()
+        item = db.query(ShopItem).filter(ShopItem.name.ilike(f"%{artikel}%")).first()
         if not item:
-            return await ctx.reply("Artikel nicht gefunden.")
-        user = get_or_create_user(db, ctx.author)
+            return await interaction.response.send_message("Artikel nicht gefunden.", ephemeral=True)
+        user = get_or_create_user(db, interaction.user)
         if user.balance < item.price:
-            return await ctx.reply("❌ Nicht genug Guthaben.")
+            return await interaction.response.send_message("❌ Nicht genug Guthaben.", ephemeral=True)
         user.balance -= item.price
         item.sold += 1
         db.add(Transaction(from_user=user.username, to_user="Shop", amount=item.price, type="Kauf"))
         db.add(LogEntry(type="shop", text=f"{user.username} kaufte '{item.name}'"))
         db.commit()
-        await ctx.reply(f"✅ Du hast **{item.name}** gekauft.")
+        await interaction.response.send_message(f"✅ Du hast **{item.name}** gekauft.")
     finally:
         db.close()
 
@@ -149,19 +162,22 @@ async def post_duty_embed(fraction: DutyFraction, changed_by: str):
         print(f"Konnte Dienst-Embed nicht senden: {e}")
 
 
-@bot.command(name="dienst")
-async def duty_cmd(ctx: commands.Context, *, fraktion: str):
+@bot.tree.command(name="dienst", description="Schaltet deinen Dienststatus für eine Fraktion um")
+@app_commands.describe(fraktion="Name der Fraktion (z.B. Polizei)")
+async def duty_cmd(interaction: discord.Interaction, fraktion: str):
     db = SessionLocal()
     try:
         f = db.query(DutyFraction).filter(DutyFraction.name.ilike(f"%{fraktion}%")).first()
         if not f:
-            return await ctx.reply("Fraktion nicht gefunden. (Unter Einstellungen im Dashboard anlegen.)")
+            return await interaction.response.send_message(
+                "Fraktion nicht gefunden. (Unter Dienstsystem im Dashboard anlegen.)", ephemeral=True
+            )
         f.on_duty = 0 if f.on_duty > 0 else min(f.on_duty + 1, f.total or 1)
-        db.add(LogEntry(type="dienst", text=f"{ctx.author.display_name} hat den Dienststatus von {f.name} geändert"))
+        db.add(LogEntry(type="dienst", text=f"{interaction.user.display_name} hat den Dienststatus von {f.name} geändert"))
         db.commit()
         status = "im Dienst" if f.on_duty > 0 else "außer Dienst"
-        await ctx.reply(f"👮 {f.name} ist jetzt **{status}** ({f.on_duty}/{f.total}).")
-        await post_duty_embed(f, ctx.author.display_name)
+        await interaction.response.send_message(f"👮 {f.name} ist jetzt **{status}** ({f.on_duty}/{f.total}).")
+        await post_duty_embed(f, interaction.user.display_name)
     finally:
         db.close()
 
