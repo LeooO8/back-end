@@ -67,13 +67,16 @@ def get_or_create_user(db, member: discord.Member) -> User:
 async def on_ready():
     print(f"Bot eingeloggt als {bot.user}")
     try:
+        # Sofort verfügbar auf dem Hauptserver:
         if GUILD_ID:
             guild = discord.Object(id=int(GUILD_ID))
             bot.tree.copy_global_to(guild=guild)
-            synced = await bot.tree.sync(guild=guild)
-        else:
-            synced = await bot.tree.sync()
-        print(f"{len(synced)} Slash-Commands synchronisiert")
+            synced_guild = await bot.tree.sync(guild=guild)
+            print(f"{len(synced_guild)} Slash-Commands sofort auf dem Hauptserver synchronisiert")
+        # Global registrieren, damit sie auf ALLEN Servern erscheinen
+        # (kann bei Discord bis zu 1 Stunde dauern, bis es dort sichtbar wird):
+        synced_global = await bot.tree.sync()
+        print(f"{len(synced_global)} Slash-Commands global synchronisiert (auf allen Servern, kann etwas dauern)")
     except Exception as e:
         print(f"Fehler beim Synchronisieren der Slash-Commands: {e}")
 
