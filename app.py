@@ -43,12 +43,21 @@ intents.message_content = True
 bot = commands.Bot(command_prefix=BOT_PREFIX, intents=intents)
 
 
+def get_starting_balance(db) -> int:
+    setting = db.query(Setting).get("startguthaben")
+    try:
+        return int(setting.value) if setting and setting.value else 500
+    except (TypeError, ValueError):
+        return 500
+
+
 def get_or_create_user(db, member: discord.Member) -> User:
     user = db.query(User).get(str(member.id))
     if not user:
-        user = User(id=str(member.id), username=member.display_name, balance=500)
+        start = get_starting_balance(db)
+        user = User(id=str(member.id), username=member.display_name, balance=start)
         db.add(user)
-        db.add(LogEntry(type="system", text=f"{member.display_name} wurde neu angelegt (Startguthaben 500 ₡)"))
+        db.add(LogEntry(type="system", text=f"{member.display_name} wurde neu angelegt (Startguthaben {start} ₡)"))
         db.commit()
     return user
 
@@ -291,7 +300,7 @@ def create_item(name: str, category: str, price: int, db: Session = Depends(get_
 # ---------- Dienstsystem ----------
 @app.get("/api/dienst")
 def dienst(db: Session = Depends(get_db)):
-    return [{"fraction": d.name, "onDuty": d.on_duty, "total": d.total, "hoursToday": d.hours_today}
+    return [{"id": d.id, "fraction": d.name, "onDuty": d.on_duty, "total": d.total, "hoursToday": d.hours_today}
             for d in db.query(DutyFraction).all()]
 
 
@@ -307,11 +316,24 @@ def toggle_dienst(fraction_id: int, db: Session = Depends(get_db), user=Depends(
 
 
 @app.post("/api/dienst")
-def create_fraction(name: str, total: int = 5, db: Session = Depends(get_db), user=Depends(require_admin)):
+def create_fraction(name: str, total: int = 5, db: Session = Depends(get_db), user=Depends(require_user)):
     f = DutyFraction(name=name, total=total)
     db.add(f)
+    log(db, "system", f"Neue Fraktion angelegt: {name} ({total} Plätze)")
     db.commit()
     return {"ok": True, "id": f.id}
+
+
+@app.delete("/api/dienst/{fraction_id}")
+def delete_fraction(fraction_id: int, db: Session = Depends(get_db), user=Depends(require_user)):
+    f = db.query(DutyFraction).get(fraction_id)
+    if not f:
+        raise HTTPException(404, "Fraktion nicht gefunden")
+    db.delete(f)
+    log(db, "system", f"Fraktion gelöscht: {f.name}")
+    db.commit()
+    return {"ok": True}
+
 
 
 # ---------- Giveaways ----------
@@ -368,7 +390,7 @@ def get_settings(db: Session = Depends(get_db)):
 
 
 @app.post("/api/settings")
-def update_settings(payload: dict, db: Session = Depends(get_db), user=Depends(require_admin)):
+def update_settings(payload: dict, db: Session = Depends(get_db), user=Depends(require_user)):
     for key, value in payload.items():
         setting = db.query(Setting).get(key)
         if setting:
