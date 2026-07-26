@@ -187,43 +187,40 @@ async def duty_cmd(
 ):
     db = SessionLocal()
     try:
+        user = get_or_create_user(db, interaction.user)
+
+        # Ist der Nutzer schon bei einer ANDEREN Fraktion im Dienst?
+        if user.on_duty_fraction and user.on_duty_fraction.lower() != fraktion.lower():
+            return await interaction.response.send_message(
+                f"❌ Du bist gerade bei **{user.on_duty_fraction}** im Dienst. "
+                f"Geh dort zuerst mit /dienst außer Dienst, bevor du bei **{fraktion}** antrittst.",
+                ephemeral=True,
+            )
+
         f = db.query(DutyFraction).filter(DutyFraction.name.ilike(fraktion)).first()
         if not f:
             f = DutyFraction(name=fraktion, total=10)
             db.add(f)
             db.commit()
-        f.on_duty = 0 if f.on_duty > 0 else min(f.on_duty + 1, f.total or 1)
-        db.add(LogEntry(type="dienst", text=f"{interaction.user.display_name} hat den Dienststatus von {f.name} geändert"))
+
+        if user.on_duty_fraction:
+            # Nutzer war bei genau dieser Fraktion im Dienst -> jetzt abtreten
+            user.on_duty_fraction = None
+            f.on_duty = max(0, f.on_duty - 1)
+            status = "außer Dienst"
+        else:
+            if f.total and f.on_duty >= f.total:
+                return await interaction.response.send_message(
+                    f"❌ Bei **{f.name}** sind schon alle Plätze belegt ({f.on_duty}/{f.total}).", ephemeral=True
+                )
+            user.on_duty_fraction = fraktion
+            f.on_duty += 1
+            status = "im Dienst"
+
+        db.add(LogEntry(type="dienst", text=f"{interaction.user.display_name} ist jetzt {status} bei {f.name}"))
         db.commit()
-        status = "im Dienst" if f.on_duty > 0 else "außer Dienst"
-        await interaction.response.send_message(f"👮 {f.name} ist jetzt **{status}** ({f.on_duty}/{f.total}).")
+        await interaction.response.send_message(f"👮 {f.name}: **{status}** ({f.on_duty}/{f.total}).")
         await post_duty_embed(f, interaction.user.display_name)
-    finally:
-        db.close()
-
-
-FRAKTIONEN = ["Polizei", "Feuerwehr", "Notfallsanitäter", "Rettungsdienst", "LKW", "Bus"]
-
-
-@bot.tree.command(name="fraktion_erstellen", description="Legt eine Fraktion aus der Liste an, falls sie noch nicht existiert")
-@app_commands.describe(fraktion="Welche Fraktion", plaetze="Wie viele Mitglieder gleichzeitig im Dienst sein können")
-async def create_fraction_cmd(
-    interaction: discord.Interaction,
-    fraktion: Literal["Polizei", "Feuerwehr", "Notfallsanitäter", "Rettungsdienst", "LKW", "Bus"],
-    plaetze: int = 10,
-):
-    db = SessionLocal()
-    try:
-        existing = db.query(DutyFraction).filter(DutyFraction.name.ilike(fraktion)).first()
-        if existing:
-            return await interaction.response.send_message(f"Die Fraktion **{existing.name}** gibt es schon.", ephemeral=True)
-        f = DutyFraction(name=fraktion, total=plaetze)
-        db.add(f)
-        db.add(LogEntry(type="system", text=f"{interaction.user.display_name} hat die Fraktion '{fraktion}' angelegt ({plaetze} Plätze)"))
-        db.commit()
-        await interaction.response.send_message(
-            f"✅ Fraktion **{fraktion}** angelegt ({plaetze} Plätze). Einen Kanal für Dienst-Benachrichtigungen kannst du im Dashboard unter Dienstsystem hinterlegen."
-        )
     finally:
         db.close()
 
