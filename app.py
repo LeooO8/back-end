@@ -164,6 +164,70 @@ async def buy_cmd(interaction: discord.Interaction, artikel: str):
         db.close()
 
 
+@bot.tree.command(name="geld_geben", description="[Admin] Gibt einem Mitglied Guthaben")
+@app_commands.describe(mitglied="Wer das Guthaben bekommt", betrag="Wie viel Guthaben")
+@app_commands.checks.has_permissions(administrator=True)
+async def give_money_cmd(interaction: discord.Interaction, mitglied: discord.Member, betrag: int):
+    if betrag <= 0:
+        return await interaction.response.send_message("Der Betrag muss positiv sein.", ephemeral=True)
+    db = SessionLocal()
+    try:
+        target = get_or_create_user(db, mitglied)
+        target.balance += betrag
+        db.add(Transaction(from_user=f"Admin:{interaction.user.display_name}", to_user=target.username, amount=betrag, type="Admin-Gutschrift"))
+        db.add(LogEntry(type="system", text=f"{interaction.user.display_name} hat {mitglied.display_name} {betrag} ₡ gegeben"))
+        db.commit()
+        await interaction.response.send_message(
+            f"✅ {mitglied.mention} hat **{betrag:,} ₡** erhalten. Neuer Kontostand: **{target.balance:,} ₡**".replace(",", ".")
+        )
+    finally:
+        db.close()
+
+
+@bot.tree.command(name="geld_abziehen", description="[Admin] Zieht einem Mitglied Guthaben ab")
+@app_commands.describe(mitglied="Wem Guthaben abgezogen wird", betrag="Wie viel Guthaben")
+@app_commands.checks.has_permissions(administrator=True)
+async def remove_money_cmd(interaction: discord.Interaction, mitglied: discord.Member, betrag: int):
+    if betrag <= 0:
+        return await interaction.response.send_message("Der Betrag muss positiv sein.", ephemeral=True)
+    db = SessionLocal()
+    try:
+        target = get_or_create_user(db, mitglied)
+        target.balance -= betrag
+        db.add(Transaction(from_user=target.username, to_user=f"Admin:{interaction.user.display_name}", amount=betrag, type="Admin-Abzug"))
+        db.add(LogEntry(type="system", text=f"{interaction.user.display_name} hat {mitglied.display_name} {betrag} ₡ abgezogen"))
+        db.commit()
+        await interaction.response.send_message(
+            f"✅ {mitglied.mention} wurden **{betrag:,} ₡** abgezogen. Neuer Kontostand: **{target.balance:,} ₡**".replace(",", ".")
+        )
+    finally:
+        db.close()
+
+
+@bot.tree.command(name="kontostand_ansehen", description="[Admin] Zeigt den Kontostand eines Mitglieds")
+@app_commands.describe(mitglied="Wessen Kontostand angezeigt werden soll")
+@app_commands.checks.has_permissions(administrator=True)
+async def view_balance_cmd(interaction: discord.Interaction, mitglied: discord.Member):
+    db = SessionLocal()
+    try:
+        target = get_or_create_user(db, mitglied)
+        await interaction.response.send_message(
+            f"💰 Kontostand von {mitglied.mention}: **{target.balance:,} ₡**".replace(",", "."), ephemeral=True
+        )
+    finally:
+        db.close()
+
+
+@give_money_cmd.error
+@remove_money_cmd.error
+@view_balance_cmd.error
+async def admin_money_cmd_error(interaction: discord.Interaction, error):
+    if isinstance(error, app_commands.MissingPermissions):
+        await interaction.response.send_message("❌ Dafür brauchst du Administrator-Rechte auf diesem Server.", ephemeral=True)
+    else:
+        await interaction.response.send_message("❌ Etwas ist schiefgelaufen.", ephemeral=True)
+
+
 async def post_duty_embed(fraction: DutyFraction, changed_by: str):
     """Postet eine Embed-Nachricht in den Dienst-Kanal der Fraktion, falls einer hinterlegt ist."""
     if not fraction.channel_id or not bot.is_ready():
