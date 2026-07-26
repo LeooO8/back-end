@@ -67,18 +67,28 @@ def get_or_create_user(db, member: discord.Member) -> User:
 async def on_ready():
     print(f"Bot eingeloggt als {bot.user}")
     try:
-        # Sofort verfügbar auf dem Hauptserver:
-        if GUILD_ID:
-            guild = discord.Object(id=int(GUILD_ID))
+        # Einmalig aufräumen: zuvor global angemeldete Befehle wieder entfernen,
+        # damit sie sich nicht mit den Server-spezifischen Befehlen doppeln.
+        bot.tree.clear_commands(guild=None)
+        await bot.tree.sync()
+
+        for guild in bot.guilds:
             bot.tree.copy_global_to(guild=guild)
-            synced_guild = await bot.tree.sync(guild=guild)
-            print(f"{len(synced_guild)} Slash-Commands sofort auf dem Hauptserver synchronisiert")
-        # Global registrieren, damit sie auf ALLEN Servern erscheinen
-        # (kann bei Discord bis zu 1 Stunde dauern, bis es dort sichtbar wird):
-        synced_global = await bot.tree.sync()
-        print(f"{len(synced_global)} Slash-Commands global synchronisiert (auf allen Servern, kann etwas dauern)")
+            synced = await bot.tree.sync(guild=guild)
+            print(f"{len(synced)} Slash-Commands sofort auf '{guild.name}' synchronisiert")
     except Exception as e:
         print(f"Fehler beim Synchronisieren der Slash-Commands: {e}")
+
+
+@bot.event
+async def on_guild_join(guild: discord.Guild):
+    """Sobald der Bot einem neuen Server beitritt, sofort die Slash-Commands dort anmelden."""
+    try:
+        bot.tree.copy_global_to(guild=guild)
+        synced = await bot.tree.sync(guild=guild)
+        print(f"{len(synced)} Slash-Commands auf neuem Server '{guild.name}' synchronisiert")
+    except Exception as e:
+        print(f"Fehler beim Synchronisieren auf neuem Server: {e}")
 
 
 @bot.tree.command(name="kontostand", description="Zeigt deinen aktuellen Kontostand")
