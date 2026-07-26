@@ -10,6 +10,7 @@ Einrichtung für dich so einfach wie möglich.
 import os
 import time
 import asyncio
+from typing import Literal
 import httpx
 import jwt
 import discord
@@ -194,6 +195,32 @@ async def duty_cmd(interaction: discord.Interaction, fraktion: str):
         status = "im Dienst" if f.on_duty > 0 else "außer Dienst"
         await interaction.response.send_message(f"👮 {f.name} ist jetzt **{status}** ({f.on_duty}/{f.total}).")
         await post_duty_embed(f, interaction.user.display_name)
+    finally:
+        db.close()
+
+
+FRAKTIONEN = ["Polizei", "Feuerwehr", "Notfallsanitäter", "Rettungsdienst", "LKW", "Bus"]
+
+
+@bot.tree.command(name="fraktion_erstellen", description="Legt eine Fraktion aus der Liste an, falls sie noch nicht existiert")
+@app_commands.describe(fraktion="Welche Fraktion", plaetze="Wie viele Mitglieder gleichzeitig im Dienst sein können")
+async def create_fraction_cmd(
+    interaction: discord.Interaction,
+    fraktion: Literal["Polizei", "Feuerwehr", "Notfallsanitäter", "Rettungsdienst", "LKW", "Bus"],
+    plaetze: int = 10,
+):
+    db = SessionLocal()
+    try:
+        existing = db.query(DutyFraction).filter(DutyFraction.name.ilike(fraktion)).first()
+        if existing:
+            return await interaction.response.send_message(f"Die Fraktion **{existing.name}** gibt es schon.", ephemeral=True)
+        f = DutyFraction(name=fraktion, total=plaetze)
+        db.add(f)
+        db.add(LogEntry(type="system", text=f"{interaction.user.display_name} hat die Fraktion '{fraktion}' angelegt ({plaetze} Plätze)"))
+        db.commit()
+        await interaction.response.send_message(
+            f"✅ Fraktion **{fraktion}** angelegt ({plaetze} Plätze). Einen Kanal für Dienst-Benachrichtigungen kannst du im Dashboard unter Dienstsystem hinterlegen."
+        )
     finally:
         db.close()
 
