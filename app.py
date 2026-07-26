@@ -180,14 +180,17 @@ async def post_duty_embed(fraction: DutyFraction, changed_by: str):
 
 
 @bot.tree.command(name="dienst", description="Schaltet deinen Dienststatus für eine Fraktion um")
-@app_commands.describe(fraktion="Name der Fraktion (z.B. Polizei)")
-async def duty_cmd(interaction: discord.Interaction, fraktion: str):
+@app_commands.describe(fraktion="Welche Fraktion")
+async def duty_cmd(
+    interaction: discord.Interaction,
+    fraktion: Literal["Polizei", "Feuerwehr", "Notfallsanitäter", "Rettungsdienst", "LKW", "Bus"],
+):
     db = SessionLocal()
     try:
-        f = db.query(DutyFraction).filter(DutyFraction.name.ilike(f"%{fraktion}%")).first()
+        f = db.query(DutyFraction).filter(DutyFraction.name.ilike(fraktion)).first()
         if not f:
             return await interaction.response.send_message(
-                "Fraktion nicht gefunden. (Unter Dienstsystem im Dashboard anlegen.)", ephemeral=True
+                f"Die Fraktion **{fraktion}** gibt es noch nicht. Leg sie zuerst mit /fraktion_erstellen an.", ephemeral=True
             )
         f.on_duty = 0 if f.on_duty > 0 else min(f.on_duty + 1, f.total or 1)
         db.add(LogEntry(type="dienst", text=f"{interaction.user.display_name} hat den Dienststatus von {f.name} geändert"))
