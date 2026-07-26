@@ -67,10 +67,13 @@ def get_or_create_user(db, member: discord.Member) -> User:
 async def on_ready():
     print(f"Bot eingeloggt als {bot.user}")
     try:
-        # Einmalig aufräumen: zuvor global angemeldete Befehle wieder entfernen,
+        # Einmalig aufräumen: zuvor global bei Discord angemeldete Befehle entfernen,
         # damit sie sich nicht mit den Server-spezifischen Befehlen doppeln.
-        bot.tree.clear_commands(guild=None)
-        await bot.tree.sync()
+        # (Nutzt einen direkten API-Aufruf, damit die eigentliche Befehlsliste im Bot unangetastet bleibt.)
+        try:
+            await bot.http.bulk_upsert_global_commands(bot.application_id, payload=[])
+        except Exception as cleanup_err:
+            print(f"Aufräumen der globalen Befehle fehlgeschlagen (kein Problem): {cleanup_err}")
 
         for guild in bot.guilds:
             bot.tree.copy_global_to(guild=guild)
