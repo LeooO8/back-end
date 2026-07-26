@@ -130,6 +130,25 @@ async def buy_cmd(ctx: commands.Context, *, artikelname: str):
         db.close()
 
 
+async def post_duty_embed(fraction: DutyFraction, changed_by: str):
+    """Postet eine Embed-Nachricht in den Dienst-Kanal der Fraktion, falls einer hinterlegt ist."""
+    if not fraction.channel_id or not bot.is_ready():
+        return
+    try:
+        channel = bot.get_channel(int(fraction.channel_id)) or await bot.fetch_channel(int(fraction.channel_id))
+        status = "im Dienst" if fraction.on_duty > 0 else "außer Dienst"
+        embed = discord.Embed(
+            title=f"👮 {fraction.name}",
+            description=f"Status geändert von **{changed_by}**",
+            color=0x4ADE80 if fraction.on_duty > 0 else 0x7C8798,
+        )
+        embed.add_field(name="Status", value=status, inline=True)
+        embed.add_field(name="Im Dienst", value=f"{fraction.on_duty}/{fraction.total}", inline=True)
+        await channel.send(embed=embed)
+    except Exception as e:
+        print(f"Konnte Dienst-Embed nicht senden: {e}")
+
+
 @bot.command(name="dienst")
 async def duty_cmd(ctx: commands.Context, *, fraktion: str):
     db = SessionLocal()
@@ -142,6 +161,7 @@ async def duty_cmd(ctx: commands.Context, *, fraktion: str):
         db.commit()
         status = "im Dienst" if f.on_duty > 0 else "außer Dienst"
         await ctx.reply(f"👮 {f.name} ist jetzt **{status}** ({f.on_duty}/{f.total}).")
+        await post_duty_embed(f, ctx.author.display_name)
     finally:
         db.close()
 
@@ -302,24 +322,27 @@ def create_item(name: str, category: str, price: int, db: Session = Depends(get_
 # ---------- Dienstsystem ----------
 @app.get("/api/dienst")
 def dienst(db: Session = Depends(get_db)):
-    return [{"id": d.id, "fraction": d.name, "onDuty": d.on_duty, "total": d.total, "hoursToday": d.hours_today}
+    return [{"id": d.id, "fraction": d.name, "onDuty": d.on_duty, "total": d.total,
+             "hoursToday": d.hours_today, "channelId": d.channel_id}
             for d in db.query(DutyFraction).all()]
 
 
 @app.post("/api/dienst/{fraction_id}/toggle")
-def toggle_dienst(fraction_id: int, db: Session = Depends(get_db), user=Depends(require_user)):
+async def toggle_dienst(fraction_id: int, db: Session = Depends(get_db), user=Depends(require_user)):
     f = db.query(DutyFraction).get(fraction_id)
     if not f:
         raise HTTPException(404, "Fraktion nicht gefunden")
     f.on_duty = 0 if f.on_duty > 0 else min(1, f.total)
     log(db, "dienst", f"Dienststatus geändert: {f.name}")
     db.commit()
+    await post_duty_embed(f, user.get("username", "Dashboard"))
     return {"ok": True}
 
 
 @app.post("/api/dienst")
-def create_fraction(name: str, total: int = 5, db: Session = Depends(get_db), user=Depends(require_user)):
-    f = DutyFraction(name=name, total=total)
+def create_fraction(name: str, total: int = 5, channel_id: str | None = None,
+                     db: Session = Depends(get_db), user=Depends(require_user)):
+    f = DutyFraction(name=name, total=total, channel_id=channel_id or None)
     db.add(f)
     log(db, "system", f"Neue Fraktion angelegt: {name} ({total} Plätze)")
     db.commit()
