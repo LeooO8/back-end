@@ -179,7 +179,7 @@ async def post_duty_embed(fraction: DutyFraction, changed_by: str):
         print(f"Konnte Dienst-Embed nicht senden: {e}")
 
 
-@bot.tree.command(name="dienst", description="Schaltet deinen Dienststatus für eine Fraktion um")
+@bot.tree.command(name="dienst", description="Dienst antreten oder abtreten für eine Fraktion")
 @app_commands.describe(fraktion="Welche Fraktion")
 async def duty_cmd(
     interaction: discord.Interaction,
@@ -189,9 +189,9 @@ async def duty_cmd(
     try:
         f = db.query(DutyFraction).filter(DutyFraction.name.ilike(fraktion)).first()
         if not f:
-            return await interaction.response.send_message(
-                f"Die Fraktion **{fraktion}** gibt es noch nicht. Leg sie zuerst mit /fraktion_erstellen an.", ephemeral=True
-            )
+            f = DutyFraction(name=fraktion, total=10)
+            db.add(f)
+            db.commit()
         f.on_duty = 0 if f.on_duty > 0 else min(f.on_duty + 1, f.total or 1)
         db.add(LogEntry(type="dienst", text=f"{interaction.user.display_name} hat den Dienststatus von {f.name} geändert"))
         db.commit()
