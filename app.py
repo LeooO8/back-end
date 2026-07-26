@@ -53,15 +53,19 @@ def get_starting_balance(db) -> int:
         return 500
 
 
-def get_or_create_user(db, member: discord.Member) -> User:
-    user = db.query(User).get(str(member.id))
+def get_or_create_user_by_id(db, user_id: str, username: str) -> User:
+    user = db.query(User).get(user_id)
     if not user:
         start = get_starting_balance(db)
-        user = User(id=str(member.id), username=member.display_name, balance=start)
+        user = User(id=user_id, username=username, balance=start)
         db.add(user)
-        db.add(LogEntry(type="system", text=f"{member.display_name} wurde neu angelegt (Startguthaben {start} ₡)"))
+        db.add(LogEntry(type="system", text=f"{username} wurde neu angelegt (Startguthaben {start} ₡)"))
         db.commit()
     return user
+
+
+def get_or_create_user(db, member: discord.Member) -> User:
+    return get_or_create_user_by_id(db, str(member.id), member.display_name)
 
 
 @bot.event
@@ -386,16 +390,38 @@ def dienst(db: Session = Depends(get_db)):
             for d in db.query(DutyFraction).all()]
 
 
+@app.get("/api/dienst/me")
+def dienst_me(db: Session = Depends(get_db), user=Depends(require_user)):
+    me = get_or_create_user_by_id(db, user["sub"], user.get("username", "Dashboard"))
+    return {"onDutyFraction": me.on_duty_fraction}
+
+
 @app.post("/api/dienst/{fraction_id}/toggle")
 async def toggle_dienst(fraction_id: int, db: Session = Depends(get_db), user=Depends(require_user)):
     f = db.query(DutyFraction).get(fraction_id)
     if not f:
         raise HTTPException(404, "Fraktion nicht gefunden")
-    f.on_duty = 0 if f.on_duty > 0 else min(1, f.total)
-    log(db, "dienst", f"Dienststatus geändert: {f.name}")
+
+    me = get_or_create_user_by_id(db, user["sub"], user.get("username", "Dashboard"))
+
+    if me.on_duty_fraction and me.on_duty_fraction.lower() != f.name.lower():
+        raise HTTPException(400, f"Du bist bereits bei {me.on_duty_fraction} im Dienst. Geh dort zuerst außer Dienst.")
+
+    if me.on_duty_fraction:
+        me.on_duty_fraction = None
+        f.on_duty = max(0, f.on_duty - 1)
+        status = "außer Dienst"
+    else:
+        if f.total and f.on_duty >= f.total:
+            raise HTTPException(400, f"Bei {f.name} sind schon alle Plätze belegt ({f.on_duty}/{f.total}).")
+        me.on_duty_fraction = f.name
+        f.on_duty += 1
+        status = "im Dienst"
+
+    log(db, "dienst", f"{me.username} ist jetzt {status} bei {f.name}")
     db.commit()
-    await post_duty_embed(f, user.get("username", "Dashboard"))
-    return {"ok": True}
+    await post_duty_embed(f, me.username)
+    return {"ok": True, "onDutyFraction": me.on_duty_fraction}
 
 
 @app.post("/api/dienst")
