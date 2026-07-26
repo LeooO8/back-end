@@ -20,6 +20,11 @@ def init_db():
             conn.commit()
         except Exception:
             pass  # Spalte existiert schon oder Tabelle ist neu angelegt - beides okay
+        try:
+            conn.execute(text("ALTER TABLE users ADD COLUMN on_duty_fraction VARCHAR"))
+            conn.commit()
+        except Exception:
+            pass
 
 
 def get_db():
