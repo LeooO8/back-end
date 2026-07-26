@@ -366,6 +366,26 @@ def bank_transactions(db: Session = Depends(get_db)):
             for t in db.query(Transaction).order_by(Transaction.created_at.desc()).limit(50).all()]
 
 
+@app.post("/api/bank/transfer")
+def bank_transfer_dashboard(empfaenger_id: str, betrag: int, db: Session = Depends(get_db), user=Depends(require_user)):
+    if betrag <= 0:
+        raise HTTPException(400, "Der Betrag muss positiv sein.")
+    sender = get_or_create_user_by_id(db, user["sub"], user.get("username", "Dashboard"))
+    receiver = db.query(User).get(empfaenger_id)
+    if not receiver:
+        raise HTTPException(404, "Empfänger nicht gefunden")
+    if sender.id == receiver.id:
+        raise HTTPException(400, "Du kannst nicht an dich selbst überweisen.")
+    if sender.balance < betrag:
+        raise HTTPException(400, "Nicht genug Guthaben.")
+    sender.balance -= betrag
+    receiver.balance += betrag
+    db.add(Transaction(from_user=sender.username, to_user=receiver.username, amount=betrag, type="Überweisung"))
+    log(db, "bank", f"{sender.username} überwies {betrag} ₡ an {receiver.username} (über Dashboard)")
+    db.commit()
+    return {"ok": True, "balance": sender.balance}
+
+
 # ---------- Shop ----------
 @app.get("/api/shop/items")
 def shop_items(db: Session = Depends(get_db)):
@@ -483,7 +503,7 @@ def users(db: Session = Depends(get_db)):
 
 
 @app.post("/api/users/{user_id}/balance")
-def adjust_balance(user_id: str, delta: int, db: Session = Depends(get_db), user=Depends(require_admin)):
+def adjust_balance(user_id: str, delta: int, db: Session = Depends(get_db), user=Depends(require_user)):
     target = db.query(User).get(user_id)
     if not target:
         raise HTTPException(404, "Benutzer nicht gefunden")
