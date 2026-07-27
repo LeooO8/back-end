@@ -101,6 +101,67 @@ async def on_guild_join(guild: discord.Guild):
         print(f"Fehler beim Synchronisieren auf neuem Server: {e}")
 
 
+def format_afk_duration(since: datetime) -> str:
+    since = since.replace(tzinfo=timezone.utc) if since.tzinfo is None else since
+    delta = datetime.now(timezone.utc) - since
+    minutes = int(delta.total_seconds() // 60)
+    if minutes < 1:
+        return "gerade eben"
+    if minutes < 60:
+        return f"vor {minutes} Minute(n)"
+    hours = minutes // 60
+    return f"vor {hours} Stunde(n)"
+
+
+@bot.event
+async def on_message(message: discord.Message):
+    if message.author.bot:
+        return
+
+    db = SessionLocal()
+    try:
+        # Eigenes AFK entfernen, sobald man wieder schreibt
+        me = db.query(User).get(str(message.author.id))
+        if me and me.afk_reason:
+            me.afk_reason = None
+            me.afk_since = None
+            db.commit()
+            try:
+                await message.channel.send(f"👋 Willkommen zurück, {message.author.mention}! Dein AFK-Status wurde entfernt.")
+            except Exception:
+                pass
+
+        # Erwähnte Mitglieder, die AFK sind, melden
+        for mentioned in message.mentions:
+            if mentioned.bot or mentioned.id == message.author.id:
+                continue
+            target = db.query(User).get(str(mentioned.id))
+            if target and target.afk_reason:
+                dauer = format_afk_duration(target.afk_since) if target.afk_since else ""
+                try:
+                    await message.channel.send(
+                        f"💤 {mentioned.display_name} ist gerade AFK ({dauer}): {target.afk_reason}"
+                    )
+                except Exception:
+                    pass
+    finally:
+        db.close()
+
+
+@bot.tree.command(name="afk", description="Setzt dich auf AFK, bis du wieder schreibst")
+@app_commands.describe(grund="Warum du AFK bist (optional)")
+async def afk_cmd(interaction: discord.Interaction, grund: str = "Kein Grund angegeben"):
+    db = SessionLocal()
+    try:
+        user = get_or_create_user(db, interaction.user)
+        user.afk_reason = grund
+        user.afk_since = datetime.now(timezone.utc)
+        db.commit()
+        await interaction.response.send_message(f"😴 {interaction.user.mention} ist jetzt AFK: {grund}")
+    finally:
+        db.close()
+
+
 @bot.tree.command(name="kontostand", description="Zeigt deinen aktuellen Kontostand")
 async def balance_cmd(interaction: discord.Interaction):
     db = SessionLocal()
