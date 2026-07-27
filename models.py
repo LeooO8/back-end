@@ -14,6 +14,8 @@ class User(Base):
     status = Column(String, default="offline")
     joined_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     on_duty_fraction = Column(String, nullable=True)  # Name der Fraktion, bei der aktuell im Dienst (oder None)
+    last_work = Column(DateTime, nullable=True)   # Zeitpunkt der letzten /work-Nutzung
+    last_daily = Column(DateTime, nullable=True)  # Zeitpunkt der letzten /daily-Nutzung
 
 
 class Transaction(Base):
