@@ -172,7 +172,7 @@ async def balance_cmd(interaction: discord.Interaction):
         db.close()
 
 
-@bot.tree.command(name="überweisen", description="Überweist Guthaben an ein anderes Mitglied")
+@bot.tree.command(name="ueberweisen", description="Überweist Guthaben an ein anderes Mitglied")
 @app_commands.describe(empfaenger="An wen überwiesen werden soll", betrag="Wie viel überwiesen werden soll")
 async def transfer_cmd(interaction: discord.Interaction, empfaenger: discord.Member, betrag: int):
     if betrag <= 0:
@@ -695,6 +695,43 @@ def adjust_balance(user_id: str, delta: int, db: Session = Depends(get_db), user
     log(db, "system", f"Guthaben von {target.username} um {delta} ₡ angepasst")
     db.commit()
     return {"ok": True, "balance": target.balance}
+
+
+# ---------- AFK-System ----------
+@app.get("/api/afk")
+def afk_list(db: Session = Depends(get_db)):
+    users = db.query(User).filter(User.afk_reason.isnot(None)).all()
+    return [
+        {"id": u.id, "name": u.username, "reason": u.afk_reason,
+         "since": u.afk_since.isoformat() if u.afk_since else None}
+        for u in users
+    ]
+
+
+@app.get("/api/afk/me")
+def afk_me(db: Session = Depends(get_db), user=Depends(require_user)):
+    me = get_or_create_user_by_id(db, user["sub"], user.get("username", "Dashboard"))
+    return {"reason": me.afk_reason, "since": me.afk_since.isoformat() if me.afk_since else None}
+
+
+@app.post("/api/afk/set")
+def afk_set(grund: str = "Kein Grund angegeben", db: Session = Depends(get_db), user=Depends(require_user)):
+    me = get_or_create_user_by_id(db, user["sub"], user.get("username", "Dashboard"))
+    me.afk_reason = grund
+    me.afk_since = datetime.now(timezone.utc)
+    log(db, "system", f"{me.username} ist jetzt AFK (über Dashboard): {grund}")
+    db.commit()
+    return {"ok": True}
+
+
+@app.post("/api/afk/clear")
+def afk_clear(db: Session = Depends(get_db), user=Depends(require_user)):
+    me = get_or_create_user_by_id(db, user["sub"], user.get("username", "Dashboard"))
+    me.afk_reason = None
+    me.afk_since = None
+    log(db, "system", f"{me.username} hat AFK beendet (über Dashboard)")
+    db.commit()
+    return {"ok": True}
 
 
 # ---------- Einstellungen ----------
