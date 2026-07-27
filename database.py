@@ -35,6 +35,16 @@ def init_db():
             conn.commit()
         except Exception:
             pass
+        try:
+            conn.execute(text("ALTER TABLE users ADD COLUMN afk_reason VARCHAR"))
+            conn.commit()
+        except Exception:
+            pass
+        try:
+            conn.execute(text("ALTER TABLE users ADD COLUMN afk_since DATETIME"))
+            conn.commit()
+        except Exception:
+            pass
 
 
 def get_db():
