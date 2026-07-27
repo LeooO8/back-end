@@ -578,12 +578,34 @@ def shop_items(db: Session = Depends(get_db)):
 
 
 @app.post("/api/shop/items")
-def create_item(name: str, category: str, price: int, db: Session = Depends(get_db), user=Depends(require_admin)):
+def create_item(name: str, category: str, price: int, db: Session = Depends(get_db), user=Depends(require_user)):
     item = ShopItem(name=name, category=category, price=price)
     db.add(item)
     log(db, "shop", f"Neuer Artikel erstellt: {name} ({price} ₡)")
     db.commit()
     return {"ok": True, "id": item.id}
+
+
+@app.post("/api/shop/items/{item_id}")
+def update_item(item_id: int, name: str, category: str, price: int, db: Session = Depends(get_db), user=Depends(require_user)):
+    item = db.query(ShopItem).get(item_id)
+    if not item:
+        raise HTTPException(404, "Artikel nicht gefunden")
+    item.name, item.category, item.price = name, category, price
+    log(db, "shop", f"Artikel bearbeitet: {name} ({price} ₡)")
+    db.commit()
+    return {"ok": True}
+
+
+@app.delete("/api/shop/items/{item_id}")
+def delete_item(item_id: int, db: Session = Depends(get_db), user=Depends(require_user)):
+    item = db.query(ShopItem).get(item_id)
+    if not item:
+        raise HTTPException(404, "Artikel nicht gefunden")
+    log(db, "shop", f"Artikel gelöscht: {item.name}")
+    db.delete(item)
+    db.commit()
+    return {"ok": True}
 
 
 # ---------- Dienstsystem ----------
