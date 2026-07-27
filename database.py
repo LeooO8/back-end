@@ -25,6 +25,16 @@ def init_db():
             conn.commit()
         except Exception:
             pass
+        try:
+            conn.execute(text("ALTER TABLE users ADD COLUMN last_work DATETIME"))
+            conn.commit()
+        except Exception:
+            pass
+        try:
+            conn.execute(text("ALTER TABLE users ADD COLUMN last_daily DATETIME"))
+            conn.commit()
+        except Exception:
+            pass
 
 
 def get_db():
