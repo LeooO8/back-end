@@ -16,6 +16,8 @@ class User(Base):
     on_duty_fraction = Column(String, nullable=True)  # Name der Fraktion, bei der aktuell im Dienst (oder None)
     last_work = Column(DateTime, nullable=True)   # Zeitpunkt der letzten /work-Nutzung
     last_daily = Column(DateTime, nullable=True)  # Zeitpunkt der letzten /daily-Nutzung
+    afk_reason = Column(String, nullable=True)    # Grund, falls aktuell AFK (None = nicht AFK)
+    afk_since = Column(DateTime, nullable=True)   # Seit wann AFK
 
 
 class Transaction(Base):
