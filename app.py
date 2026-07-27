@@ -172,7 +172,7 @@ async def balance_cmd(interaction: discord.Interaction):
         db.close()
 
 
-@bot.tree.command(name="Überweisen", description="Überweist Guthaben an ein anderes Mitglied")
+@bot.tree.command(name="überweisen", description="Überweist Guthaben an ein anderes Mitglied")
 @app_commands.describe(empfaenger="An wen überwiesen werden soll", betrag="Wie viel überwiesen werden soll")
 async def transfer_cmd(interaction: discord.Interaction, empfaenger: discord.Member, betrag: int):
     if betrag <= 0:
