@@ -10,6 +10,8 @@ Einrichtung für dich so einfach wie möglich.
 import os
 import time
 import asyncio
+import random
+from datetime import datetime, timedelta, timezone
 from typing import Literal
 import httpx
 import jwt
@@ -160,6 +162,63 @@ async def buy_cmd(interaction: discord.Interaction, artikel: str):
         db.add(LogEntry(type="shop", text=f"{user.username} kaufte '{item.name}'"))
         db.commit()
         await interaction.response.send_message(f"✅ Du hast **{item.name}** gekauft.")
+    finally:
+        db.close()
+
+
+WORK_COOLDOWN = timedelta(hours=1)
+DAILY_COOLDOWN = timedelta(hours=24)
+DAILY_AMOUNT = 250
+
+
+@bot.tree.command(name="work", description="Arbeite bei einem Job und verdiene Guthaben")
+@app_commands.describe(job="Bei welchem Job du arbeitest")
+async def work_cmd(
+    interaction: discord.Interaction,
+    job: Literal["Polizei", "Feuerwehr", "Notfallsanitäter", "Rettungsdienst", "LKW", "Bus"],
+):
+    db = SessionLocal()
+    try:
+        user = get_or_create_user(db, interaction.user)
+        now = datetime.now(timezone.utc)
+        last = user.last_work.replace(tzinfo=timezone.utc) if user.last_work else None
+        if last and now - last < WORK_COOLDOWN:
+            remaining = WORK_COOLDOWN - (now - last)
+            minuten = int(remaining.total_seconds() // 60) + 1
+            return await interaction.response.send_message(
+                f"⏳ Du musst noch **{minuten} Minute(n)** warten, bevor du wieder arbeiten kannst.", ephemeral=True
+            )
+        verdienst = random.randint(100, 400)
+        user.balance += verdienst
+        user.last_work = now
+        db.add(Transaction(from_user=f"Job:{job}", to_user=user.username, amount=verdienst, type="Arbeit"))
+        db.add(LogEntry(type="system", text=f"{user.username} hat als {job} gearbeitet und {verdienst} ₡ verdient"))
+        db.commit()
+        await interaction.response.send_message(f"💼 Du hast als **{job}** gearbeitet und **{verdienst} ₡** verdient!")
+    finally:
+        db.close()
+
+
+@bot.tree.command(name="daily", description="Hole dir dein tägliches Guthaben ab")
+async def daily_cmd(interaction: discord.Interaction):
+    db = SessionLocal()
+    try:
+        user = get_or_create_user(db, interaction.user)
+        now = datetime.now(timezone.utc)
+        last = user.last_daily.replace(tzinfo=timezone.utc) if user.last_daily else None
+        if last and now - last < DAILY_COOLDOWN:
+            remaining = DAILY_COOLDOWN - (now - last)
+            hours = int(remaining.total_seconds() // 3600)
+            minutes = int((remaining.total_seconds() % 3600) // 60)
+            return await interaction.response.send_message(
+                f"⏳ Dein tägliches Guthaben ist schon abgeholt. Nochmal in **{hours}h {minutes}min** möglich.", ephemeral=True
+            )
+        user.balance += DAILY_AMOUNT
+        user.last_daily = now
+        db.add(Transaction(from_user="Täglicher Bonus", to_user=user.username, amount=DAILY_AMOUNT, type="Daily"))
+        db.add(LogEntry(type="system", text=f"{user.username} hat den täglichen Bonus abgeholt"))
+        db.commit()
+        await interaction.response.send_message(f"🎁 Du hast deinen täglichen Bonus von **{DAILY_AMOUNT} ₡** abgeholt!")
     finally:
         db.close()
 
