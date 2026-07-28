@@ -679,7 +679,7 @@ def me(request: Request):
 
 @app.post("/auth/logout")
 def logout(response: Response):
-    response.delete_cookie("session")
+    response.delete_cookie("session", samesite="none", secure=True)
     return {"ok": True}
 
 
