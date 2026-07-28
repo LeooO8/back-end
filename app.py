@@ -25,7 +25,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import func
 
 from database import get_db, init_db, SessionLocal
-from models import User, Transaction, ShopItem, DutyFraction, Giveaway, LogEntry, Setting
+from models import User, Transaction, ShopItem, DutyFraction, Giveaway, LogEntry, Setting, LoginSession
 
 # ---------- Konfiguration (kommt aus Umgebungsvariablen, siehe README) ----------
 DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
@@ -624,7 +624,7 @@ def login():
 
 
 @app.get("/auth/callback")
-async def callback(code: str):
+async def callback(code: str, request: Request):
     async with httpx.AsyncClient() as client:
         token_res = await client.post(
             f"{DISCORD_API}/oauth2/token",
@@ -647,6 +647,10 @@ async def callback(code: str):
     if existing:
         role = existing.role
     db.add(LogEntry(type="login", text=f"{discord_user['username']} hat sich über Discord angemeldet"))
+
+    client_ip = request.headers.get("x-forwarded-for", request.client.host if request.client else "unbekannt").split(",")[0].strip()
+    user_agent = request.headers.get("user-agent", "unbekannt")
+    db.add(LoginSession(user_id=discord_user["id"], username=discord_user["username"], ip=client_ip, user_agent=user_agent))
     db.commit()
     db.close()
 
@@ -1014,6 +1018,60 @@ def afk_clear(db: Session = Depends(get_db), user=Depends(require_user)):
     log(db, "system", f"{me.username} hat AFK beendet (über Dashboard)")
     db.commit()
     return {"ok": True}
+
+
+# ---------- Sicherheit ----------
+def simplify_user_agent(ua: str) -> str:
+    ua = ua or ""
+    browser = "Unbekannter Browser"
+    if "Chrome" in ua and "Edg" not in ua:
+        browser = "Chrome"
+    elif "Firefox" in ua:
+        browser = "Firefox"
+    elif "Safari" in ua and "Chrome" not in ua:
+        browser = "Safari"
+    elif "Edg" in ua:
+        browser = "Edge"
+    os_name = "Unbekanntes Gerät"
+    if "Windows" in ua:
+        os_name = "Windows"
+    elif "Mac OS" in ua:
+        os_name = "macOS"
+    elif "Android" in ua:
+        os_name = "Android"
+    elif "iPhone" in ua or "iPad" in ua:
+        os_name = "iOS"
+    elif "Linux" in ua:
+        os_name = "Linux"
+    return f"{browser} · {os_name}"
+
+
+def mask_ip(ip: str) -> str:
+    if not ip:
+        return "unbekannt"
+    parts = ip.split(".")
+    if len(parts) == 4:
+        return f"{parts[0]}.{parts[1]}.xx.xx"
+    return ip[:8] + "…"
+
+
+@app.get("/api/security/sessions")
+def security_sessions(db: Session = Depends(get_db), user=Depends(require_user)):
+    sessions = db.query(LoginSession).order_by(LoginSession.created_at.desc()).limit(20).all()
+    return [
+        {"user": s.username, "device": simplify_user_agent(s.user_agent), "ip": mask_ip(s.ip),
+         "time": s.created_at.isoformat()}
+        for s in sessions
+    ]
+
+
+@app.get("/api/security/overview")
+def security_overview(db: Session = Depends(get_db)):
+    admin_count = db.query(func.count(User.id)).filter(User.role.in_(["Admin", "Owner"])).scalar() or 0
+    login_count_24h = db.query(func.count(LoginSession.id)).filter(
+        LoginSession.created_at >= datetime.now(timezone.utc) - timedelta(hours=24)
+    ).scalar() or 0
+    return {"admin_count": admin_count, "logins_24h": login_count_24h}
 
 
 # ---------- Einstellungen ----------
