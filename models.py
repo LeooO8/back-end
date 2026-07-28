@@ -57,6 +57,9 @@ class Giveaway(Base):
     ends_at = Column(DateTime, nullable=True)
     status = Column(String, default="aktiv")
     winner = Column(String, nullable=True)
+    channel_id = Column(String, nullable=True)
+    message_id = Column(String, nullable=True)
+    participants = Column(String, nullable=True)  # Discord-User-IDs, kommagetrennt
 
 
 class LogEntry(Base):
