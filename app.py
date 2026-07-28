@@ -644,6 +644,8 @@ async def callback(code: str):
     existing = db.query(User).get(discord_user["id"])
     if existing:
         role = existing.role
+    db.add(LogEntry(type="login", text=f"{discord_user['username']} hat sich über Discord angemeldet"))
+    db.commit()
     db.close()
 
     session_token = jwt.encode(
