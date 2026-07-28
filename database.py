@@ -45,6 +45,16 @@ def init_db():
             conn.commit()
         except Exception:
             pass
+        for stmt in [
+            "ALTER TABLE giveaways ADD COLUMN channel_id VARCHAR",
+            "ALTER TABLE giveaways ADD COLUMN message_id VARCHAR",
+            "ALTER TABLE giveaways ADD COLUMN participants VARCHAR",
+        ]:
+            try:
+                conn.execute(text(stmt))
+                conn.commit()
+            except Exception:
+                pass
 
 
 def get_db():
