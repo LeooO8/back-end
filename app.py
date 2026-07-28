@@ -64,6 +64,8 @@ def get_or_create_user_by_id(db, user_id: str, username: str) -> User:
         db.add(user)
         db.add(LogEntry(type="system", text=f"{username} wurde neu angelegt (Startguthaben {start} ₡)"))
         db.commit()
+    user.last_seen = datetime.now(timezone.utc)
+    db.commit()
     return user
 
 
@@ -910,12 +912,29 @@ def logs(type: str | None = None, db: Session = Depends(get_db)):
 # ---------- Statistiken ----------
 @app.get("/api/stats")
 def stats(db: Session = Depends(get_db)):
+    seven_days_ago = datetime.now(timezone.utc) - timedelta(days=7)
+    active_users = db.query(func.count(User.id)).filter(User.last_seen >= seven_days_ago).scalar() or 0
+
+    weekday_labels = ["Mo", "Di", "Mi", "Do", "Fr", "Sa", "So"]
+    weekly_activity = []
+    today = datetime.now(timezone.utc).date()
+    for offset in range(6, -1, -1):
+        day = today - timedelta(days=offset)
+        count = (
+            db.query(func.count(LogEntry.id))
+            .filter(func.date(LogEntry.created_at) == day.isoformat())
+            .scalar() or 0
+        )
+        weekly_activity.append({"day": weekday_labels[day.weekday()], "count": count})
+
     return {
         "member_count": db.query(func.count(User.id)).scalar() or 0,
+        "active_users_7d": active_users,
         "total_balance": db.query(func.sum(User.balance)).scalar() or 0,
         "shop_sales": db.query(func.sum(ShopItem.sold)).scalar() or 0,
         "duty_hours_today": db.query(func.sum(DutyFraction.hours_today)).scalar() or 0,
         "giveaway_count": db.query(func.count(Giveaway.id)).scalar() or 0,
+        "weekly_activity": weekly_activity,
     }
 
 
