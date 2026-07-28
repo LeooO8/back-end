@@ -49,6 +49,7 @@ def init_db():
             "ALTER TABLE giveaways ADD COLUMN channel_id VARCHAR",
             "ALTER TABLE giveaways ADD COLUMN message_id VARCHAR",
             "ALTER TABLE giveaways ADD COLUMN participants VARCHAR",
+            "ALTER TABLE users ADD COLUMN last_seen DATETIME",
         ]:
             try:
                 conn.execute(text(stmt))
