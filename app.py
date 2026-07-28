@@ -17,7 +17,7 @@ import httpx
 import jwt
 import discord
 from discord import app_commands
-from discord.ext import commands
+from discord.ext import commands, tasks
 from fastapi import FastAPI, Depends, HTTPException, Response, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
@@ -87,6 +87,9 @@ async def on_ready():
             bot.tree.copy_global_to(guild=guild)
             synced = await bot.tree.sync(guild=guild)
             print(f"{len(synced)} Slash-Commands sofort auf '{guild.name}' synchronisiert")
+
+        if not check_expired_giveaways.is_running():
+            check_expired_giveaways.start()
     except Exception as e:
         print(f"Fehler beim Synchronisieren der Slash-Commands: {e}")
 
@@ -137,6 +140,148 @@ def format_afk_duration(since: datetime) -> str:
         return f"vor {minutes} Minute(n)"
     hours = minutes // 60
     return f"vor {hours} Stunde(n)"
+
+
+GIVEAWAY_EMOJI = "🎉"
+
+
+async def draw_giveaway_winner(db, giveaway: Giveaway):
+    ids = [i for i in (giveaway.participants or "").split(",") if i.strip()]
+    winner_id = random.choice(ids) if ids else None
+    winner_name = None
+    if winner_id:
+        winner_user = db.query(User).get(winner_id)
+        winner_name = winner_user.username if winner_user else winner_id
+    giveaway.status = "beendet"
+    giveaway.winner = winner_name
+    db.add(LogEntry(type="system", text=f"Giveaway '{giveaway.prize}' beendet — Gewinner: {winner_name or 'niemand teilgenommen'}"))
+    db.commit()
+
+    if giveaway.channel_id and bot.is_ready():
+        try:
+            channel = bot.get_channel(int(giveaway.channel_id)) or await bot.fetch_channel(int(giveaway.channel_id))
+            if winner_id:
+                await channel.send(f"🎉 Das Giveaway für **{giveaway.prize}** ist vorbei! Herzlichen Glückwunsch <@{winner_id}>!")
+            else:
+                await channel.send(f"🎉 Das Giveaway für **{giveaway.prize}** ist vorbei — leider hat niemand teilgenommen.")
+        except Exception as e:
+            print(f"Konnte Giveaway-Ergebnis nicht senden: {e}")
+
+
+@tasks.loop(seconds=30)
+async def check_expired_giveaways():
+    db = SessionLocal()
+    try:
+        now = datetime.now(timezone.utc)
+        expired = db.query(Giveaway).filter(Giveaway.status == "aktiv", Giveaway.ends_at <= now).all()
+        for g in expired:
+            await draw_giveaway_winner(db, g)
+    finally:
+        db.close()
+
+
+@bot.event
+async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
+    if str(payload.emoji) != GIVEAWAY_EMOJI or payload.user_id == bot.user.id:
+        return
+    db = SessionLocal()
+    try:
+        g = db.query(Giveaway).filter(Giveaway.message_id == str(payload.message_id), Giveaway.status == "aktiv").first()
+        if not g:
+            return
+        ids = [i for i in (g.participants or "").split(",") if i.strip()]
+        if str(payload.user_id) not in ids:
+            ids.append(str(payload.user_id))
+            g.participants = ",".join(ids)
+            g.entries = len(ids)
+            db.commit()
+    finally:
+        db.close()
+
+
+@bot.event
+async def on_raw_reaction_remove(payload: discord.RawReactionActionEvent):
+    if str(payload.emoji) != GIVEAWAY_EMOJI:
+        return
+    db = SessionLocal()
+    try:
+        g = db.query(Giveaway).filter(Giveaway.message_id == str(payload.message_id), Giveaway.status == "aktiv").first()
+        if not g:
+            return
+        ids = [i for i in (g.participants or "").split(",") if i.strip()]
+        if str(payload.user_id) in ids:
+            ids.remove(str(payload.user_id))
+            g.participants = ",".join(ids)
+            g.entries = len(ids)
+            db.commit()
+    finally:
+        db.close()
+
+
+@bot.tree.command(name="giveaway_erstellen", description="[Admin] Startet ein Giveaway")
+@app_commands.describe(preis="Was verlost wird", dauer_minuten="Wie lange das Giveaway läuft (in Minuten)")
+@app_commands.checks.has_permissions(administrator=True)
+async def giveaway_create_cmd(interaction: discord.Interaction, preis: str, dauer_minuten: int):
+    if dauer_minuten <= 0:
+        return await interaction.response.send_message("Die Dauer muss positiv sein.", ephemeral=True)
+    ends_at = datetime.now(timezone.utc) + timedelta(minutes=dauer_minuten)
+    embed = discord.Embed(
+        title="🎉 Giveaway!",
+        description=f"Preis: **{preis}**\nReagiere mit {GIVEAWAY_EMOJI}, um teilzunehmen!\nEndet: <t:{int(ends_at.timestamp())}:R>",
+        color=0xF2B705,
+    )
+    await interaction.response.send_message(embed=embed)
+    message = await interaction.original_response()
+    await message.add_reaction(GIVEAWAY_EMOJI)
+
+    db = SessionLocal()
+    try:
+        g = Giveaway(prize=preis, status="aktiv", ends_at=ends_at, channel_id=str(interaction.channel.id), message_id=str(message.id), participants="")
+        db.add(g)
+        db.add(LogEntry(type="system", text=f"{interaction.user.display_name} hat ein Giveaway gestartet: {preis}"))
+        db.commit()
+    finally:
+        db.close()
+
+
+@bot.tree.command(name="giveaway_beenden", description="[Admin] Beendet ein Giveaway sofort und lost aus")
+@app_commands.describe(giveaway_id="Die ID des Giveaways (siehe Dashboard)")
+@app_commands.checks.has_permissions(administrator=True)
+async def giveaway_end_cmd(interaction: discord.Interaction, giveaway_id: int):
+    db = SessionLocal()
+    try:
+        g = db.query(Giveaway).get(giveaway_id)
+        if not g or g.status != "aktiv":
+            return await interaction.response.send_message("Giveaway nicht gefunden oder schon beendet.", ephemeral=True)
+        await draw_giveaway_winner(db, g)
+        await interaction.response.send_message(f"✅ Giveaway **{g.prize}** wurde beendet.")
+    finally:
+        db.close()
+
+
+@bot.tree.command(name="giveaway_neu_auslosen", description="[Admin] Lost einen neuen Gewinner für ein beendetes Giveaway aus")
+@app_commands.describe(giveaway_id="Die ID des Giveaways (siehe Dashboard)")
+@app_commands.checks.has_permissions(administrator=True)
+async def giveaway_reroll_cmd(interaction: discord.Interaction, giveaway_id: int):
+    db = SessionLocal()
+    try:
+        g = db.query(Giveaway).get(giveaway_id)
+        if not g:
+            return await interaction.response.send_message("Giveaway nicht gefunden.", ephemeral=True)
+        await draw_giveaway_winner(db, g)
+        await interaction.response.send_message(f"🔁 Neuer Gewinner für **{g.prize}** wurde ausgelost.")
+    finally:
+        db.close()
+
+
+@giveaway_create_cmd.error
+@giveaway_end_cmd.error
+@giveaway_reroll_cmd.error
+async def giveaway_cmd_error(interaction: discord.Interaction, error):
+    if isinstance(error, app_commands.MissingPermissions):
+        await interaction.response.send_message("❌ Dafür brauchst du Administrator-Rechte auf diesem Server.", ephemeral=True)
+    else:
+        await interaction.response.send_message("❌ Etwas ist schiefgelaufen.", ephemeral=True)
 
 
 @bot.event
@@ -706,6 +851,49 @@ def giveaways(db: Session = Depends(get_db)):
     return [{"id": g.id, "prize": g.prize, "entries": g.entries, "status": g.status,
              "winner": g.winner, "ends": g.ends_at.isoformat() if g.ends_at else None}
             for g in db.query(Giveaway).all()]
+
+
+@app.post("/api/giveaways")
+async def create_giveaway_dashboard(preis: str, dauer_minuten: int, channel_id: str, db: Session = Depends(get_db), user=Depends(require_user)):
+    if not bot.is_ready():
+        raise HTTPException(503, "Bot ist noch nicht bereit.")
+    try:
+        channel = bot.get_channel(int(channel_id)) or await bot.fetch_channel(int(channel_id))
+    except Exception:
+        raise HTTPException(400, "Kanal nicht gefunden. Prüfe die Kanal-ID.")
+
+    ends_at = datetime.now(timezone.utc) + timedelta(minutes=dauer_minuten)
+    embed = discord.Embed(
+        title="🎉 Giveaway!",
+        description=f"Preis: **{preis}**\nReagiere mit {GIVEAWAY_EMOJI}, um teilzunehmen!\nEndet: <t:{int(ends_at.timestamp())}:R>",
+        color=0xF2B705,
+    )
+    message = await channel.send(embed=embed)
+    await message.add_reaction(GIVEAWAY_EMOJI)
+
+    g = Giveaway(prize=preis, status="aktiv", ends_at=ends_at, channel_id=str(channel.id), message_id=str(message.id), participants="")
+    db.add(g)
+    log(db, "system", f"Giveaway über Dashboard gestartet: {preis}")
+    db.commit()
+    return {"ok": True, "id": g.id}
+
+
+@app.post("/api/giveaways/{giveaway_id}/end")
+async def end_giveaway_dashboard(giveaway_id: int, db: Session = Depends(get_db), user=Depends(require_user)):
+    g = db.query(Giveaway).get(giveaway_id)
+    if not g or g.status != "aktiv":
+        raise HTTPException(400, "Giveaway nicht gefunden oder schon beendet.")
+    await draw_giveaway_winner(db, g)
+    return {"ok": True}
+
+
+@app.post("/api/giveaways/{giveaway_id}/reroll")
+async def reroll_giveaway_dashboard(giveaway_id: int, db: Session = Depends(get_db), user=Depends(require_user)):
+    g = db.query(Giveaway).get(giveaway_id)
+    if not g:
+        raise HTTPException(404, "Giveaway nicht gefunden.")
+    await draw_giveaway_winner(db, g)
+    return {"ok": True}
 
 
 # ---------- Logs ----------
