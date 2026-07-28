@@ -45,6 +45,7 @@ intents = discord.Intents.default()
 intents.members = True
 intents.message_content = True
 bot = commands.Bot(command_prefix=BOT_PREFIX, intents=intents)
+BOT_START_TIME = datetime.now(timezone.utc)
 
 
 def get_starting_balance(db) -> int:
@@ -88,6 +89,31 @@ async def on_ready():
             print(f"{len(synced)} Slash-Commands sofort auf '{guild.name}' synchronisiert")
     except Exception as e:
         print(f"Fehler beim Synchronisieren der Slash-Commands: {e}")
+
+
+@bot.event
+async def on_member_join(member: discord.Member):
+    """Neues Mitglied bekommt automatisch das eingestellte Startguthaben + Willkommensnachricht."""
+    db = SessionLocal()
+    try:
+        user = get_or_create_user(db, member)
+
+        channel = member.guild.system_channel
+        if channel is None:
+            for ch in member.guild.text_channels:
+                perms = ch.permissions_for(member.guild.me)
+                if perms.send_messages:
+                    channel = ch
+                    break
+        if channel:
+            try:
+                await channel.send(
+                    f"👋 Willkommen {member.mention}! Du hast ein Startguthaben von **{user.balance:,} ₡** erhalten.".replace(",", ".")
+                )
+            except Exception as e:
+                print(f"Konnte Willkommensnachricht nicht senden: {e}")
+    finally:
+        db.close()
 
 
 @bot.event
@@ -172,7 +198,7 @@ async def balance_cmd(interaction: discord.Interaction):
         db.close()
 
 
-@bot.tree.command(name="überweisen", description="Überweist Guthaben an ein anderes Mitglied")
+@bot.tree.command(name="ueberweisen", description="Überweist Guthaben an ein anderes Mitglied")
 @app_commands.describe(empfaenger="An wen überwiesen werden soll", betrag="Wie viel überwiesen werden soll")
 async def transfer_cmd(interaction: discord.Interaction, empfaenger: discord.Member, betrag: int):
     if betrag <= 0:
@@ -527,11 +553,13 @@ def overview(db: Session = Depends(get_db)):
     member_count = db.query(func.count(User.id)).scalar() or 0
     on_duty = db.query(func.sum(DutyFraction.on_duty)).scalar() or 0
     recent = db.query(LogEntry).order_by(LogEntry.created_at.desc()).limit(5).all()
+    uptime_seconds = (datetime.now(timezone.utc) - BOT_START_TIME).total_seconds()
     return {
         "bot_status": "online" if bot.is_ready() else "startet…",
         "member_count": member_count,
         "on_duty": on_duty,
         "total_balance": total_balance,
+        "uptime_seconds": uptime_seconds,
         "recent_logs": [{"id": l.id, "type": l.type, "text": l.text, "time": l.created_at.isoformat()} for l in recent],
     }
 
