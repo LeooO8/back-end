@@ -939,10 +939,33 @@ def stats(db: Session = Depends(get_db)):
 
 
 # ---------- Benutzerverwaltung ----------
+def compute_status(last_seen) -> str:
+    if not last_seen:
+        return "offline"
+    last_seen = last_seen.replace(tzinfo=timezone.utc) if last_seen.tzinfo is None else last_seen
+    delta = datetime.now(timezone.utc) - last_seen
+    if delta < timedelta(minutes=5):
+        return "online"
+    if delta < timedelta(minutes=30):
+        return "idle"
+    return "offline"
+
+
 @app.get("/api/users")
 def users(db: Session = Depends(get_db)):
     return [{"id": u.id, "name": u.username, "role": u.role, "balance": u.balance,
-             "status": u.status, "joined": u.joined_at.isoformat()} for u in db.query(User).all()]
+             "status": compute_status(u.last_seen), "joined": u.joined_at.isoformat()} for u in db.query(User).all()]
+
+
+@app.post("/api/users/{user_id}/role")
+def update_role(user_id: str, role: str, db: Session = Depends(get_db), user=Depends(require_user)):
+    target = db.query(User).get(user_id)
+    if not target:
+        raise HTTPException(404, "Benutzer nicht gefunden")
+    target.role = role
+    log(db, "system", f"Rolle von {target.username} geändert zu {role}")
+    db.commit()
+    return {"ok": True}
 
 
 @app.post("/api/users/{user_id}/balance")
