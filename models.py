@@ -4,10 +4,19 @@ from datetime import datetime, timezone
 
 Base = declarative_base()
 
+# WICHTIG - Mehrserver-Unterstützung:
+# User.id und Setting.key speichern intern "<guild_id>:<eigentliche_id>",
+# damit derselbe Discord-Nutzer bzw. derselbe Einstellungsschlüssel auf
+# jedem Server unabhängig existieren kann, ohne das Datenbankschema
+# (Primärschlüssel) ändern zu müssen. Alle anderen Tabellen haben dafür
+# eine eigene guild_id-Spalte.
+
 
 class User(Base):
     __tablename__ = "users"
-    id = Column(String, primary_key=True)          # Discord User-ID
+    id = Column(String, primary_key=True)          # "<guild_id>:<Discord User-ID>"
+    guild_id = Column(String, nullable=True)
+    discord_id = Column(String, nullable=True)     # reine Discord User-ID, ohne Server-Präfix
     username = Column(String, nullable=False)
     role = Column(String, default="Mitglied")
     balance = Column(BigInteger, default=500)
@@ -24,6 +33,7 @@ class User(Base):
 class Transaction(Base):
     __tablename__ = "transactions"
     id = Column(Integer, primary_key=True, autoincrement=True)
+    guild_id = Column(String, nullable=True)
     from_user = Column(String, nullable=False)
     to_user = Column(String, nullable=False)
     amount = Column(BigInteger, nullable=False)
@@ -34,6 +44,7 @@ class Transaction(Base):
 class ShopItem(Base):
     __tablename__ = "shop_items"
     id = Column(Integer, primary_key=True, autoincrement=True)
+    guild_id = Column(String, nullable=True)
     name = Column(String, nullable=False)
     category = Column(String, nullable=False)
     price = Column(BigInteger, nullable=False)
@@ -43,6 +54,7 @@ class ShopItem(Base):
 class DutyFraction(Base):
     __tablename__ = "duty_fractions"
     id = Column(Integer, primary_key=True, autoincrement=True)
+    guild_id = Column(String, nullable=True)
     name = Column(String, nullable=False)
     on_duty = Column(Integer, default=0)
     total = Column(Integer, default=0)
@@ -53,6 +65,7 @@ class DutyFraction(Base):
 class Giveaway(Base):
     __tablename__ = "giveaways"
     id = Column(Integer, primary_key=True, autoincrement=True)
+    guild_id = Column(String, nullable=True)
     prize = Column(String, nullable=False)
     entries = Column(Integer, default=0)
     ends_at = Column(DateTime, nullable=True)
@@ -66,6 +79,7 @@ class Giveaway(Base):
 class LogEntry(Base):
     __tablename__ = "logs"
     id = Column(Integer, primary_key=True, autoincrement=True)
+    guild_id = Column(String, nullable=True)
     type = Column(String, nullable=False)
     text = Column(String, nullable=False)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
@@ -73,13 +87,14 @@ class LogEntry(Base):
 
 class Setting(Base):
     __tablename__ = "settings"
-    key = Column(String, primary_key=True)
+    key = Column(String, primary_key=True)  # "<guild_id>:<eigentlicher_schluessel>"
     value = Column(String, nullable=True)
 
 
 class LoginSession(Base):
     __tablename__ = "login_sessions"
     id = Column(Integer, primary_key=True, autoincrement=True)
+    guild_id = Column(String, nullable=True)
     user_id = Column(String, nullable=False)
     username = Column(String, nullable=False)
     ip = Column(String, nullable=True)
