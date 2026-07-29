@@ -4,8 +4,12 @@ Ein einziger Service, der ZWEI Dinge gleichzeitig macht:
 2. Die Dashboard-API (FastAPI) - liefert Daten fürs Web-Dashboard
 
 Beide teilen sich dieselbe Datenbank, laufen im selben Prozess und werden
-zusammen als EIN Dienst gehostet (z.B. auf Railway). Das hält die
-Einrichtung für dich so einfach wie möglich.
+zusammen als EIN Dienst gehostet (z.B. auf Railway).
+
+MEHRSERVER-UNTERSTÜTZUNG: Der Bot kann auf mehreren Discord-Servern
+gleichzeitig laufen. Jeder Server hat seine EIGENEN, komplett getrennten
+Daten (Konten, Shop, Dienste, Giveaways, Einstellungen, Logs). Das
+Dashboard fragt dafür bei jeder Anfrage eine guild_id (Server-ID) mit.
 """
 import os
 import time
@@ -38,6 +42,17 @@ GUILD_ID = os.getenv("DISCORD_GUILD_ID")
 BOT_PREFIX = os.getenv("BOT_PREFIX", "!")
 DISCORD_API = "https://discord.com/api"
 
+
+def ukey(guild_id, discord_id) -> str:
+    """Baut den internen User-Schlüssel '<guild_id>:<discord_id>'."""
+    return f"{guild_id}:{discord_id}"
+
+
+def gkey(guild_id, key) -> str:
+    """Baut den internen Settings-Schlüssel '<guild_id>:<key>'."""
+    return f"{guild_id}:{key}"
+
+
 # =========================================================
 # TEIL 1: DER DISCORD-BOT
 # =========================================================
@@ -48,21 +63,22 @@ bot = commands.Bot(command_prefix=BOT_PREFIX, intents=intents)
 BOT_START_TIME = datetime.now(timezone.utc)
 
 
-def get_starting_balance(db) -> int:
-    setting = db.query(Setting).get("startguthaben")
+def get_starting_balance(db, guild_id) -> int:
+    setting = db.query(Setting).get(gkey(guild_id, "startguthaben"))
     try:
         return int(setting.value) if setting and setting.value else 500
     except (TypeError, ValueError):
         return 500
 
 
-def get_or_create_user_by_id(db, user_id: str, username: str) -> User:
-    user = db.query(User).get(user_id)
+def get_or_create_user_by_id(db, guild_id: str, discord_id: str, username: str) -> User:
+    uid = ukey(guild_id, discord_id)
+    user = db.query(User).get(uid)
     if not user:
-        start = get_starting_balance(db)
-        user = User(id=user_id, username=username, balance=start)
+        start = get_starting_balance(db, guild_id)
+        user = User(id=uid, guild_id=str(guild_id), discord_id=str(discord_id), username=username, balance=start)
         db.add(user)
-        db.add(LogEntry(type="system", text=f"{username} wurde neu angelegt (Startguthaben {start} ₡)"))
+        db.add(LogEntry(guild_id=str(guild_id), type="system", text=f"{username} wurde neu angelegt (Startguthaben {start} ₡)"))
         db.commit()
     user.last_seen = datetime.now(timezone.utc)
     db.commit()
@@ -70,7 +86,11 @@ def get_or_create_user_by_id(db, user_id: str, username: str) -> User:
 
 
 def get_or_create_user(db, member: discord.Member) -> User:
-    return get_or_create_user_by_id(db, str(member.id), member.display_name)
+    return get_or_create_user_by_id(db, str(member.guild.id), str(member.id), member.display_name)
+
+
+def log(db: Session, guild_id: str, type_: str, text: str):
+    db.add(LogEntry(guild_id=str(guild_id), type=type_, text=text))
 
 
 @bot.event
@@ -79,7 +99,6 @@ async def on_ready():
     try:
         # Einmalig aufräumen: zuvor global bei Discord angemeldete Befehle entfernen,
         # damit sie sich nicht mit den Server-spezifischen Befehlen doppeln.
-        # (Nutzt einen direkten API-Aufruf, damit die eigentliche Befehlsliste im Bot unangetastet bleibt.)
         try:
             await bot.http.bulk_upsert_global_commands(bot.application_id, payload=[])
         except Exception as cleanup_err:
@@ -123,7 +142,10 @@ async def on_member_join(member: discord.Member):
 
 @bot.event
 async def on_guild_join(guild: discord.Guild):
-    """Sobald der Bot einem neuen Server beitritt, sofort die Slash-Commands dort anmelden."""
+    """Sobald der Bot einem neuen Server beitritt, sofort die Slash-Commands dort anmelden.
+    Der neue Server bekommt automatisch ein eigenes, leeres Dashboard - es werden
+    keinerlei Daten von anderen Servern übernommen, da alles über die guild_id
+    getrennt gespeichert wird."""
     try:
         bot.tree.copy_global_to(guild=guild)
         synced = await bot.tree.sync(guild=guild)
@@ -149,21 +171,22 @@ GIVEAWAY_EMOJI = "🎉"
 
 async def draw_giveaway_winner(db, giveaway: Giveaway):
     ids = [i for i in (giveaway.participants or "").split(",") if i.strip()]
-    winner_id = random.choice(ids) if ids else None
+    winner_discord_id = random.choice(ids) if ids else None
     winner_name = None
-    if winner_id:
-        winner_user = db.query(User).get(winner_id)
-        winner_name = winner_user.username if winner_user else winner_id
+    if winner_discord_id:
+        winner_user = db.query(User).get(ukey(giveaway.guild_id, winner_discord_id))
+        winner_name = winner_user.username if winner_user else winner_discord_id
     giveaway.status = "beendet"
     giveaway.winner = winner_name
-    db.add(LogEntry(type="system", text=f"Giveaway '{giveaway.prize}' beendet — Gewinner: {winner_name or 'niemand teilgenommen'}"))
+    db.add(LogEntry(guild_id=giveaway.guild_id, type="system",
+                     text=f"Giveaway '{giveaway.prize}' beendet — Gewinner: {winner_name or 'niemand teilgenommen'}"))
     db.commit()
 
     if giveaway.channel_id and bot.is_ready():
         try:
             channel = bot.get_channel(int(giveaway.channel_id)) or await bot.fetch_channel(int(giveaway.channel_id))
-            if winner_id:
-                await channel.send(f"🎉 Das Giveaway für **{giveaway.prize}** ist vorbei! Herzlichen Glückwunsch <@{winner_id}>!")
+            if winner_discord_id:
+                await channel.send(f"🎉 Das Giveaway für **{giveaway.prize}** ist vorbei! Herzlichen Glückwunsch <@{winner_discord_id}>!")
             else:
                 await channel.send(f"🎉 Das Giveaway für **{giveaway.prize}** ist vorbei — leider hat niemand teilgenommen.")
         except Exception as e:
@@ -238,9 +261,11 @@ async def giveaway_create_cmd(interaction: discord.Interaction, preis: str, daue
 
     db = SessionLocal()
     try:
-        g = Giveaway(prize=preis, status="aktiv", ends_at=ends_at, channel_id=str(interaction.channel.id), message_id=str(message.id), participants="")
+        g = Giveaway(guild_id=str(interaction.guild_id), prize=preis, status="aktiv", ends_at=ends_at,
+                     channel_id=str(interaction.channel.id), message_id=str(message.id), participants="")
         db.add(g)
-        db.add(LogEntry(type="system", text=f"{interaction.user.display_name} hat ein Giveaway gestartet: {preis}"))
+        db.add(LogEntry(guild_id=str(interaction.guild_id), type="system",
+                         text=f"{interaction.user.display_name} hat ein Giveaway gestartet: {preis}"))
         db.commit()
     finally:
         db.close()
@@ -252,7 +277,7 @@ async def giveaway_create_cmd(interaction: discord.Interaction, preis: str, daue
 async def giveaway_end_cmd(interaction: discord.Interaction, giveaway_id: int):
     db = SessionLocal()
     try:
-        g = db.query(Giveaway).get(giveaway_id)
+        g = db.query(Giveaway).filter(Giveaway.id == giveaway_id, Giveaway.guild_id == str(interaction.guild_id)).first()
         if not g or g.status != "aktiv":
             return await interaction.response.send_message("Giveaway nicht gefunden oder schon beendet.", ephemeral=True)
         await draw_giveaway_winner(db, g)
@@ -267,7 +292,7 @@ async def giveaway_end_cmd(interaction: discord.Interaction, giveaway_id: int):
 async def giveaway_reroll_cmd(interaction: discord.Interaction, giveaway_id: int):
     db = SessionLocal()
     try:
-        g = db.query(Giveaway).get(giveaway_id)
+        g = db.query(Giveaway).filter(Giveaway.id == giveaway_id, Giveaway.guild_id == str(interaction.guild_id)).first()
         if not g:
             return await interaction.response.send_message("Giveaway nicht gefunden.", ephemeral=True)
         await draw_giveaway_winner(db, g)
@@ -288,13 +313,14 @@ async def giveaway_cmd_error(interaction: discord.Interaction, error):
 
 @bot.event
 async def on_message(message: discord.Message):
-    if message.author.bot:
+    if message.author.bot or not message.guild:
         return
+    guild_id = str(message.guild.id)
 
     db = SessionLocal()
     try:
         # Eigenes AFK entfernen, sobald man wieder schreibt
-        me = db.query(User).get(str(message.author.id))
+        me = db.query(User).get(ukey(guild_id, message.author.id))
         if me and me.afk_reason:
             me.afk_reason = None
             me.afk_since = None
@@ -308,7 +334,7 @@ async def on_message(message: discord.Message):
         for mentioned in message.mentions:
             if mentioned.bot or mentioned.id == message.author.id:
                 continue
-            target = db.query(User).get(str(mentioned.id))
+            target = db.query(User).get(ukey(guild_id, mentioned.id))
             if target and target.afk_reason:
                 dauer = format_afk_duration(target.afk_since) if target.afk_since else ""
                 try:
@@ -358,8 +384,8 @@ async def transfer_cmd(interaction: discord.Interaction, empfaenger: discord.Mem
             return await interaction.response.send_message("❌ Nicht genug Guthaben.", ephemeral=True)
         sender.balance -= betrag
         receiver.balance += betrag
-        db.add(Transaction(from_user=sender.username, to_user=receiver.username, amount=betrag, type="Überweisung"))
-        db.add(LogEntry(type="bank", text=f"{sender.username} überwies {betrag} ₡ an {receiver.username}"))
+        db.add(Transaction(guild_id=str(interaction.guild_id), from_user=sender.username, to_user=receiver.username, amount=betrag, type="Überweisung"))
+        db.add(LogEntry(guild_id=str(interaction.guild_id), type="bank", text=f"{sender.username} überwies {betrag} ₡ an {receiver.username}"))
         db.commit()
         await interaction.response.send_message(f"✅ {betrag:,} ₡ an {empfaenger.mention} überwiesen.".replace(",", "."))
     finally:
@@ -370,7 +396,7 @@ async def transfer_cmd(interaction: discord.Interaction, empfaenger: discord.Mem
 async def shop_cmd(interaction: discord.Interaction):
     db = SessionLocal()
     try:
-        items = db.query(ShopItem).all()
+        items = db.query(ShopItem).filter(ShopItem.guild_id == str(interaction.guild_id)).all()
         if not items:
             return await interaction.response.send_message("Der Shop ist noch leer.")
         text = "\n".join(f"**{i.name}** — {i.price:,} ₡".replace(",", ".") for i in items)
@@ -384,7 +410,9 @@ async def shop_cmd(interaction: discord.Interaction):
 async def buy_cmd(interaction: discord.Interaction, artikel: str):
     db = SessionLocal()
     try:
-        item = db.query(ShopItem).filter(ShopItem.name.ilike(f"%{artikel}%")).first()
+        item = db.query(ShopItem).filter(
+            ShopItem.guild_id == str(interaction.guild_id), ShopItem.name.ilike(f"%{artikel}%")
+        ).first()
         if not item:
             return await interaction.response.send_message("Artikel nicht gefunden.", ephemeral=True)
         user = get_or_create_user(db, interaction.user)
@@ -392,8 +420,8 @@ async def buy_cmd(interaction: discord.Interaction, artikel: str):
             return await interaction.response.send_message("❌ Nicht genug Guthaben.", ephemeral=True)
         user.balance -= item.price
         item.sold += 1
-        db.add(Transaction(from_user=user.username, to_user="Shop", amount=item.price, type="Kauf"))
-        db.add(LogEntry(type="shop", text=f"{user.username} kaufte '{item.name}'"))
+        db.add(Transaction(guild_id=str(interaction.guild_id), from_user=user.username, to_user="Shop", amount=item.price, type="Kauf"))
+        db.add(LogEntry(guild_id=str(interaction.guild_id), type="shop", text=f"{user.username} kaufte '{item.name}'"))
         db.commit()
         await interaction.response.send_message(f"✅ Du hast **{item.name}** gekauft.")
     finally:
@@ -425,8 +453,8 @@ async def work_cmd(
         verdienst = random.randint(100, 400)
         user.balance += verdienst
         user.last_work = now
-        db.add(Transaction(from_user=f"Job:{job}", to_user=user.username, amount=verdienst, type="Arbeit"))
-        db.add(LogEntry(type="system", text=f"{user.username} hat als {job} gearbeitet und {verdienst} ₡ verdient"))
+        db.add(Transaction(guild_id=str(interaction.guild_id), from_user=f"Job:{job}", to_user=user.username, amount=verdienst, type="Arbeit"))
+        db.add(LogEntry(guild_id=str(interaction.guild_id), type="system", text=f"{user.username} hat als {job} gearbeitet und {verdienst} ₡ verdient"))
         db.commit()
         await interaction.response.send_message(f"💼 Du hast als **{job}** gearbeitet und **{verdienst} ₡** verdient!")
     finally:
@@ -449,8 +477,8 @@ async def daily_cmd(interaction: discord.Interaction):
             )
         user.balance += DAILY_AMOUNT
         user.last_daily = now
-        db.add(Transaction(from_user="Täglicher Bonus", to_user=user.username, amount=DAILY_AMOUNT, type="Daily"))
-        db.add(LogEntry(type="system", text=f"{user.username} hat den täglichen Bonus abgeholt"))
+        db.add(Transaction(guild_id=str(interaction.guild_id), from_user="Täglicher Bonus", to_user=user.username, amount=DAILY_AMOUNT, type="Daily"))
+        db.add(LogEntry(guild_id=str(interaction.guild_id), type="system", text=f"{user.username} hat den täglichen Bonus abgeholt"))
         db.commit()
         await interaction.response.send_message(f"🎁 Du hast deinen täglichen Bonus von **{DAILY_AMOUNT} ₡** abgeholt!")
     finally:
@@ -467,8 +495,8 @@ async def give_money_cmd(interaction: discord.Interaction, mitglied: discord.Mem
     try:
         target = get_or_create_user(db, mitglied)
         target.balance += betrag
-        db.add(Transaction(from_user=f"Admin:{interaction.user.display_name}", to_user=target.username, amount=betrag, type="Admin-Gutschrift"))
-        db.add(LogEntry(type="system", text=f"{interaction.user.display_name} hat {mitglied.display_name} {betrag} ₡ gegeben"))
+        db.add(Transaction(guild_id=str(interaction.guild_id), from_user=f"Admin:{interaction.user.display_name}", to_user=target.username, amount=betrag, type="Admin-Gutschrift"))
+        db.add(LogEntry(guild_id=str(interaction.guild_id), type="system", text=f"{interaction.user.display_name} hat {mitglied.display_name} {betrag} ₡ gegeben"))
         db.commit()
         await interaction.response.send_message(
             f"✅ {mitglied.mention} hat **{betrag:,} ₡** erhalten. Neuer Kontostand: **{target.balance:,} ₡**".replace(",", ".")
@@ -487,8 +515,8 @@ async def remove_money_cmd(interaction: discord.Interaction, mitglied: discord.M
     try:
         target = get_or_create_user(db, mitglied)
         target.balance -= betrag
-        db.add(Transaction(from_user=target.username, to_user=f"Admin:{interaction.user.display_name}", amount=betrag, type="Admin-Abzug"))
-        db.add(LogEntry(type="system", text=f"{interaction.user.display_name} hat {mitglied.display_name} {betrag} ₡ abgezogen"))
+        db.add(Transaction(guild_id=str(interaction.guild_id), from_user=target.username, to_user=f"Admin:{interaction.user.display_name}", amount=betrag, type="Admin-Abzug"))
+        db.add(LogEntry(guild_id=str(interaction.guild_id), type="system", text=f"{interaction.user.display_name} hat {mitglied.display_name} {betrag} ₡ abgezogen"))
         db.commit()
         await interaction.response.send_message(
             f"✅ {mitglied.mention} wurden **{betrag:,} ₡** abgezogen. Neuer Kontostand: **{target.balance:,} ₡**".replace(",", ".")
@@ -548,9 +576,9 @@ async def duty_cmd(
 ):
     db = SessionLocal()
     try:
+        guild_id = str(interaction.guild_id)
         user = get_or_create_user(db, interaction.user)
 
-        # Ist der Nutzer schon bei einer ANDEREN Fraktion im Dienst?
         if user.on_duty_fraction and user.on_duty_fraction.lower() != fraktion.lower():
             return await interaction.response.send_message(
                 f"❌ Du bist gerade bei **{user.on_duty_fraction}** im Dienst. "
@@ -558,14 +586,13 @@ async def duty_cmd(
                 ephemeral=True,
             )
 
-        f = db.query(DutyFraction).filter(DutyFraction.name.ilike(fraktion)).first()
+        f = db.query(DutyFraction).filter(DutyFraction.guild_id == guild_id, DutyFraction.name.ilike(fraktion)).first()
         if not f:
-            f = DutyFraction(name=fraktion, total=10)
+            f = DutyFraction(guild_id=guild_id, name=fraktion, total=10)
             db.add(f)
             db.commit()
 
         if user.on_duty_fraction:
-            # Nutzer war bei genau dieser Fraktion im Dienst -> jetzt abtreten
             user.on_duty_fraction = None
             f.on_duty = max(0, f.on_duty - 1)
             status = "außer Dienst"
@@ -578,7 +605,7 @@ async def duty_cmd(
             f.on_duty += 1
             status = "im Dienst"
 
-        db.add(LogEntry(type="dienst", text=f"{interaction.user.display_name} ist jetzt {status} bei {f.name}"))
+        db.add(LogEntry(guild_id=guild_id, type="dienst", text=f"{interaction.user.display_name} ist jetzt {status} bei {f.name}"))
         db.commit()
         await interaction.response.send_message(f"👮 {f.name}: **{status}** ({f.on_duty}/{f.total}).")
         await post_duty_embed(f, interaction.user.display_name)
@@ -599,14 +626,9 @@ app.add_middleware(
 )
 
 
-def log(db: Session, type_: str, text: str):
-    db.add(LogEntry(type=type_, text=text))
-
-
 @app.on_event("startup")
 async def startup():
     init_db()
-    # Bot im Hintergrund starten, damit er parallel zur API läuft
     if DISCORD_BOT_TOKEN:
         asyncio.create_task(bot.start(DISCORD_BOT_TOKEN))
     else:
@@ -642,20 +664,16 @@ async def callback(code: str, request: Request):
         discord_user = user_res.json()
 
     db = SessionLocal()
-    role = "Mitglied"
-    existing = db.query(User).get(discord_user["id"])
-    if existing:
-        role = existing.role
-    db.add(LogEntry(type="login", text=f"{discord_user['username']} hat sich über Discord angemeldet"))
+    db.add(LogEntry(guild_id=None, type="login", text=f"{discord_user['username']} hat sich über Discord angemeldet"))
 
     client_ip = request.headers.get("x-forwarded-for", request.client.host if request.client else "unbekannt").split(",")[0].strip()
     user_agent = request.headers.get("user-agent", "unbekannt")
-    db.add(LoginSession(user_id=discord_user["id"], username=discord_user["username"], ip=client_ip, user_agent=user_agent))
+    db.add(LoginSession(guild_id=None, user_id=discord_user["id"], username=discord_user["username"], ip=client_ip, user_agent=user_agent))
     db.commit()
     db.close()
 
     session_token = jwt.encode(
-        {"sub": discord_user["id"], "username": discord_user["username"], "role": role,
+        {"sub": discord_user["id"], "username": discord_user["username"],
          "exp": int(time.time()) + 60 * 60 * 24 * 7},
         JWT_SECRET, algorithm="HS256",
     )
@@ -693,19 +711,47 @@ def require_user(request: Request):
         raise HTTPException(401, "Sitzung abgelaufen")
 
 
-def require_admin(user=Depends(require_user)):
-    if user.get("role") not in ("Owner", "Admin"):
-        raise HTTPException(403, "Keine Berechtigung")
+def is_guild_member(guild_id: str, discord_user_id: str) -> bool:
+    """Prüft (über den Bot-Cache), ob der Nutzer Mitglied des angegebenen Servers ist."""
+    guild = bot.get_guild(int(guild_id))
+    if not guild:
+        return False
+    member = guild.get_member(int(discord_user_id))
+    return member is not None
+
+
+def require_guild_access(guild_id: str, user=Depends(require_user)):
+    """Stellt sicher, dass der eingeloggte Nutzer wirklich Mitglied dieses Servers ist,
+    bevor er dort etwas verändern darf."""
+    if not is_guild_member(guild_id, user["sub"]):
+        raise HTTPException(403, "Du bist kein Mitglied dieses Servers.")
     return user
+
+
+# ---------- Server-Auswahl ----------
+@app.get("/api/my-guilds")
+def my_guilds(user=Depends(require_user)):
+    result = []
+    for guild in bot.guilds:
+        member = guild.get_member(int(user["sub"]))
+        if member:
+            result.append({"id": str(guild.id), "name": guild.name})
+    return result
+
+
+@app.get("/api/guild-info")
+def guild_info(guild_id: str, db: Session = Depends(get_db)):
+    guild = bot.get_guild(int(guild_id)) if guild_id.isdigit() else None
+    return {"id": guild_id, "name": guild.name if guild else None, "exists": guild is not None}
 
 
 # ---------- Übersicht ----------
 @app.get("/api/overview")
-def overview(db: Session = Depends(get_db)):
-    total_balance = db.query(func.sum(User.balance)).scalar() or 0
-    member_count = db.query(func.count(User.id)).scalar() or 0
-    on_duty = db.query(func.sum(DutyFraction.on_duty)).scalar() or 0
-    recent = db.query(LogEntry).order_by(LogEntry.created_at.desc()).limit(5).all()
+def overview(guild_id: str, db: Session = Depends(get_db)):
+    total_balance = db.query(func.sum(User.balance)).filter(User.guild_id == guild_id).scalar() or 0
+    member_count = db.query(func.count(User.id)).filter(User.guild_id == guild_id).scalar() or 0
+    on_duty = db.query(func.sum(DutyFraction.on_duty)).filter(DutyFraction.guild_id == guild_id).scalar() or 0
+    recent = db.query(LogEntry).filter(LogEntry.guild_id == guild_id).order_by(LogEntry.created_at.desc()).limit(5).all()
     uptime_seconds = (datetime.now(timezone.utc) - BOT_START_TIME).total_seconds()
     return {
         "bot_status": "online" if bot.is_ready() else "startet…",
@@ -719,23 +765,23 @@ def overview(db: Session = Depends(get_db)):
 
 # ---------- Bank ----------
 @app.get("/api/bank/accounts")
-def bank_accounts(db: Session = Depends(get_db)):
+def bank_accounts(guild_id: str, db: Session = Depends(get_db)):
     return [{"id": u.id, "name": u.username, "balance": u.balance, "role": u.role}
-            for u in db.query(User).order_by(User.balance.desc()).all()]
+            for u in db.query(User).filter(User.guild_id == guild_id).order_by(User.balance.desc()).all()]
 
 
 @app.get("/api/bank/transactions")
-def bank_transactions(db: Session = Depends(get_db)):
+def bank_transactions(guild_id: str, db: Session = Depends(get_db)):
     return [{"id": t.id, "from": t.from_user, "to": t.to_user, "amount": t.amount,
              "type": t.type, "time": t.created_at.isoformat()}
-            for t in db.query(Transaction).order_by(Transaction.created_at.desc()).limit(50).all()]
+            for t in db.query(Transaction).filter(Transaction.guild_id == guild_id).order_by(Transaction.created_at.desc()).limit(50).all()]
 
 
 @app.post("/api/bank/transfer")
-def bank_transfer_dashboard(empfaenger_id: str, betrag: int, db: Session = Depends(get_db), user=Depends(require_user)):
+def bank_transfer_dashboard(guild_id: str, empfaenger_id: str, betrag: int, db: Session = Depends(get_db), user=Depends(require_guild_access)):
     if betrag <= 0:
         raise HTTPException(400, "Der Betrag muss positiv sein.")
-    sender = get_or_create_user_by_id(db, user["sub"], user.get("username", "Dashboard"))
+    sender = get_or_create_user_by_id(db, guild_id, user["sub"], user.get("username", "Dashboard"))
     receiver = db.query(User).get(empfaenger_id)
     if not receiver:
         raise HTTPException(404, "Empfänger nicht gefunden")
@@ -745,45 +791,45 @@ def bank_transfer_dashboard(empfaenger_id: str, betrag: int, db: Session = Depen
         raise HTTPException(400, "Nicht genug Guthaben.")
     sender.balance -= betrag
     receiver.balance += betrag
-    db.add(Transaction(from_user=sender.username, to_user=receiver.username, amount=betrag, type="Überweisung"))
-    log(db, "bank", f"{sender.username} überwies {betrag} ₡ an {receiver.username} (über Dashboard)")
+    db.add(Transaction(guild_id=guild_id, from_user=sender.username, to_user=receiver.username, amount=betrag, type="Überweisung"))
+    log(db, guild_id, "bank", f"{sender.username} überwies {betrag} ₡ an {receiver.username} (über Dashboard)")
     db.commit()
     return {"ok": True, "balance": sender.balance}
 
 
 # ---------- Shop ----------
 @app.get("/api/shop/items")
-def shop_items(db: Session = Depends(get_db)):
+def shop_items(guild_id: str, db: Session = Depends(get_db)):
     return [{"id": i.id, "name": i.name, "category": i.category, "price": i.price, "sold": i.sold}
-            for i in db.query(ShopItem).all()]
+            for i in db.query(ShopItem).filter(ShopItem.guild_id == guild_id).all()]
 
 
 @app.post("/api/shop/items")
-def create_item(name: str, category: str, price: int, db: Session = Depends(get_db), user=Depends(require_user)):
-    item = ShopItem(name=name, category=category, price=price)
+def create_item(guild_id: str, name: str, category: str, price: int, db: Session = Depends(get_db), user=Depends(require_guild_access)):
+    item = ShopItem(guild_id=guild_id, name=name, category=category, price=price)
     db.add(item)
-    log(db, "shop", f"Neuer Artikel erstellt: {name} ({price} ₡)")
+    log(db, guild_id, "shop", f"Neuer Artikel erstellt: {name} ({price} ₡)")
     db.commit()
     return {"ok": True, "id": item.id}
 
 
 @app.post("/api/shop/items/{item_id}")
-def update_item(item_id: int, name: str, category: str, price: int, db: Session = Depends(get_db), user=Depends(require_user)):
-    item = db.query(ShopItem).get(item_id)
+def update_item(item_id: int, guild_id: str, name: str, category: str, price: int, db: Session = Depends(get_db), user=Depends(require_guild_access)):
+    item = db.query(ShopItem).filter(ShopItem.id == item_id, ShopItem.guild_id == guild_id).first()
     if not item:
         raise HTTPException(404, "Artikel nicht gefunden")
     item.name, item.category, item.price = name, category, price
-    log(db, "shop", f"Artikel bearbeitet: {name} ({price} ₡)")
+    log(db, guild_id, "shop", f"Artikel bearbeitet: {name} ({price} ₡)")
     db.commit()
     return {"ok": True}
 
 
 @app.delete("/api/shop/items/{item_id}")
-def delete_item(item_id: int, db: Session = Depends(get_db), user=Depends(require_user)):
-    item = db.query(ShopItem).get(item_id)
+def delete_item(item_id: int, guild_id: str, db: Session = Depends(get_db), user=Depends(require_guild_access)):
+    item = db.query(ShopItem).filter(ShopItem.id == item_id, ShopItem.guild_id == guild_id).first()
     if not item:
         raise HTTPException(404, "Artikel nicht gefunden")
-    log(db, "shop", f"Artikel gelöscht: {item.name}")
+    log(db, guild_id, "shop", f"Artikel gelöscht: {item.name}")
     db.delete(item)
     db.commit()
     return {"ok": True}
@@ -791,25 +837,25 @@ def delete_item(item_id: int, db: Session = Depends(get_db), user=Depends(requir
 
 # ---------- Dienstsystem ----------
 @app.get("/api/dienst")
-def dienst(db: Session = Depends(get_db)):
+def dienst(guild_id: str, db: Session = Depends(get_db)):
     return [{"id": d.id, "fraction": d.name, "onDuty": d.on_duty, "total": d.total,
              "hoursToday": d.hours_today, "channelId": d.channel_id}
-            for d in db.query(DutyFraction).all()]
+            for d in db.query(DutyFraction).filter(DutyFraction.guild_id == guild_id).all()]
 
 
 @app.get("/api/dienst/me")
-def dienst_me(db: Session = Depends(get_db), user=Depends(require_user)):
-    me = get_or_create_user_by_id(db, user["sub"], user.get("username", "Dashboard"))
+def dienst_me(guild_id: str, db: Session = Depends(get_db), user=Depends(require_user)):
+    me = get_or_create_user_by_id(db, guild_id, user["sub"], user.get("username", "Dashboard"))
     return {"onDutyFraction": me.on_duty_fraction}
 
 
 @app.post("/api/dienst/{fraction_id}/toggle")
-async def toggle_dienst(fraction_id: int, db: Session = Depends(get_db), user=Depends(require_user)):
-    f = db.query(DutyFraction).get(fraction_id)
+async def toggle_dienst(fraction_id: int, guild_id: str, db: Session = Depends(get_db), user=Depends(require_guild_access)):
+    f = db.query(DutyFraction).filter(DutyFraction.id == fraction_id, DutyFraction.guild_id == guild_id).first()
     if not f:
         raise HTTPException(404, "Fraktion nicht gefunden")
 
-    me = get_or_create_user_by_id(db, user["sub"], user.get("username", "Dashboard"))
+    me = get_or_create_user_by_id(db, guild_id, user["sub"], user.get("username", "Dashboard"))
 
     if me.on_duty_fraction and me.on_duty_fraction.lower() != f.name.lower():
         raise HTTPException(400, f"Du bist bereits bei {me.on_duty_fraction} im Dienst. Geh dort zuerst außer Dienst.")
@@ -825,44 +871,43 @@ async def toggle_dienst(fraction_id: int, db: Session = Depends(get_db), user=De
         f.on_duty += 1
         status = "im Dienst"
 
-    log(db, "dienst", f"{me.username} ist jetzt {status} bei {f.name}")
+    log(db, guild_id, "dienst", f"{me.username} ist jetzt {status} bei {f.name}")
     db.commit()
     await post_duty_embed(f, me.username)
     return {"ok": True, "onDutyFraction": me.on_duty_fraction}
 
 
 @app.post("/api/dienst")
-def create_fraction(name: str, total: int = 5, channel_id: str | None = None,
-                     db: Session = Depends(get_db), user=Depends(require_user)):
-    f = DutyFraction(name=name, total=total, channel_id=channel_id or None)
+def create_fraction(guild_id: str, name: str, total: int = 5, channel_id: str | None = None,
+                     db: Session = Depends(get_db), user=Depends(require_guild_access)):
+    f = DutyFraction(guild_id=guild_id, name=name, total=total, channel_id=channel_id or None)
     db.add(f)
-    log(db, "system", f"Neue Fraktion angelegt: {name} ({total} Plätze)")
+    log(db, guild_id, "system", f"Neue Fraktion angelegt: {name} ({total} Plätze)")
     db.commit()
     return {"ok": True, "id": f.id}
 
 
 @app.delete("/api/dienst/{fraction_id}")
-def delete_fraction(fraction_id: int, db: Session = Depends(get_db), user=Depends(require_user)):
-    f = db.query(DutyFraction).get(fraction_id)
+def delete_fraction(fraction_id: int, guild_id: str, db: Session = Depends(get_db), user=Depends(require_guild_access)):
+    f = db.query(DutyFraction).filter(DutyFraction.id == fraction_id, DutyFraction.guild_id == guild_id).first()
     if not f:
         raise HTTPException(404, "Fraktion nicht gefunden")
     db.delete(f)
-    log(db, "system", f"Fraktion gelöscht: {f.name}")
+    log(db, guild_id, "system", f"Fraktion gelöscht: {f.name}")
     db.commit()
     return {"ok": True}
 
 
-
 # ---------- Giveaways ----------
 @app.get("/api/giveaways")
-def giveaways(db: Session = Depends(get_db)):
+def giveaways(guild_id: str, db: Session = Depends(get_db)):
     return [{"id": g.id, "prize": g.prize, "entries": g.entries, "status": g.status,
              "winner": g.winner, "ends": g.ends_at.isoformat() if g.ends_at else None}
-            for g in db.query(Giveaway).all()]
+            for g in db.query(Giveaway).filter(Giveaway.guild_id == guild_id).all()]
 
 
 @app.post("/api/giveaways")
-async def create_giveaway_dashboard(preis: str, dauer_minuten: int, channel_id: str, db: Session = Depends(get_db), user=Depends(require_user)):
+async def create_giveaway_dashboard(guild_id: str, preis: str, dauer_minuten: int, channel_id: str, db: Session = Depends(get_db), user=Depends(require_guild_access)):
     if not bot.is_ready():
         raise HTTPException(503, "Bot ist noch nicht bereit.")
     try:
@@ -879,16 +924,16 @@ async def create_giveaway_dashboard(preis: str, dauer_minuten: int, channel_id: 
     message = await channel.send(embed=embed)
     await message.add_reaction(GIVEAWAY_EMOJI)
 
-    g = Giveaway(prize=preis, status="aktiv", ends_at=ends_at, channel_id=str(channel.id), message_id=str(message.id), participants="")
+    g = Giveaway(guild_id=guild_id, prize=preis, status="aktiv", ends_at=ends_at, channel_id=str(channel.id), message_id=str(message.id), participants="")
     db.add(g)
-    log(db, "system", f"Giveaway über Dashboard gestartet: {preis}")
+    log(db, guild_id, "system", f"Giveaway über Dashboard gestartet: {preis}")
     db.commit()
     return {"ok": True, "id": g.id}
 
 
 @app.post("/api/giveaways/{giveaway_id}/end")
-async def end_giveaway_dashboard(giveaway_id: int, db: Session = Depends(get_db), user=Depends(require_user)):
-    g = db.query(Giveaway).get(giveaway_id)
+async def end_giveaway_dashboard(giveaway_id: int, guild_id: str, db: Session = Depends(get_db), user=Depends(require_guild_access)):
+    g = db.query(Giveaway).filter(Giveaway.id == giveaway_id, Giveaway.guild_id == guild_id).first()
     if not g or g.status != "aktiv":
         raise HTTPException(400, "Giveaway nicht gefunden oder schon beendet.")
     await draw_giveaway_winner(db, g)
@@ -896,8 +941,8 @@ async def end_giveaway_dashboard(giveaway_id: int, db: Session = Depends(get_db)
 
 
 @app.post("/api/giveaways/{giveaway_id}/reroll")
-async def reroll_giveaway_dashboard(giveaway_id: int, db: Session = Depends(get_db), user=Depends(require_user)):
-    g = db.query(Giveaway).get(giveaway_id)
+async def reroll_giveaway_dashboard(giveaway_id: int, guild_id: str, db: Session = Depends(get_db), user=Depends(require_guild_access)):
+    g = db.query(Giveaway).filter(Giveaway.id == giveaway_id, Giveaway.guild_id == guild_id).first()
     if not g:
         raise HTTPException(404, "Giveaway nicht gefunden.")
     await draw_giveaway_winner(db, g)
@@ -906,8 +951,8 @@ async def reroll_giveaway_dashboard(giveaway_id: int, db: Session = Depends(get_
 
 # ---------- Logs ----------
 @app.get("/api/logs")
-def logs(type: str | None = None, db: Session = Depends(get_db)):
-    q = db.query(LogEntry).order_by(LogEntry.created_at.desc())
+def logs(guild_id: str, type: str | None = None, db: Session = Depends(get_db)):
+    q = db.query(LogEntry).filter(LogEntry.guild_id == guild_id).order_by(LogEntry.created_at.desc())
     if type and type != "alle":
         q = q.filter(LogEntry.type == type)
     return [{"id": l.id, "type": l.type, "text": l.text, "time": l.created_at.isoformat()} for l in q.limit(200).all()]
@@ -915,9 +960,9 @@ def logs(type: str | None = None, db: Session = Depends(get_db)):
 
 # ---------- Statistiken ----------
 @app.get("/api/stats")
-def stats(db: Session = Depends(get_db)):
+def stats(guild_id: str, db: Session = Depends(get_db)):
     seven_days_ago = datetime.now(timezone.utc) - timedelta(days=7)
-    active_users = db.query(func.count(User.id)).filter(User.last_seen >= seven_days_ago).scalar() or 0
+    active_users = db.query(func.count(User.id)).filter(User.guild_id == guild_id, User.last_seen >= seven_days_ago).scalar() or 0
 
     weekday_labels = ["Mo", "Di", "Mi", "Do", "Fr", "Sa", "So"]
     weekly_activity = []
@@ -926,18 +971,18 @@ def stats(db: Session = Depends(get_db)):
         day = today - timedelta(days=offset)
         count = (
             db.query(func.count(LogEntry.id))
-            .filter(func.date(LogEntry.created_at) == day.isoformat())
+            .filter(LogEntry.guild_id == guild_id, func.date(LogEntry.created_at) == day.isoformat())
             .scalar() or 0
         )
         weekly_activity.append({"day": weekday_labels[day.weekday()], "count": count})
 
     return {
-        "member_count": db.query(func.count(User.id)).scalar() or 0,
+        "member_count": db.query(func.count(User.id)).filter(User.guild_id == guild_id).scalar() or 0,
         "active_users_7d": active_users,
-        "total_balance": db.query(func.sum(User.balance)).scalar() or 0,
-        "shop_sales": db.query(func.sum(ShopItem.sold)).scalar() or 0,
-        "duty_hours_today": db.query(func.sum(DutyFraction.hours_today)).scalar() or 0,
-        "giveaway_count": db.query(func.count(Giveaway.id)).scalar() or 0,
+        "total_balance": db.query(func.sum(User.balance)).filter(User.guild_id == guild_id).scalar() or 0,
+        "shop_sales": db.query(func.sum(ShopItem.sold)).filter(ShopItem.guild_id == guild_id).scalar() or 0,
+        "duty_hours_today": db.query(func.sum(DutyFraction.hours_today)).filter(DutyFraction.guild_id == guild_id).scalar() or 0,
+        "giveaway_count": db.query(func.count(Giveaway.id)).filter(Giveaway.guild_id == guild_id).scalar() or 0,
         "weekly_activity": weekly_activity,
     }
 
@@ -956,66 +1001,67 @@ def compute_status(last_seen) -> str:
 
 
 @app.get("/api/users")
-def users(db: Session = Depends(get_db)):
+def users(guild_id: str, db: Session = Depends(get_db)):
     return [{"id": u.id, "name": u.username, "role": u.role, "balance": u.balance,
-             "status": compute_status(u.last_seen), "joined": u.joined_at.isoformat()} for u in db.query(User).all()]
+             "status": compute_status(u.last_seen), "joined": u.joined_at.isoformat()}
+            for u in db.query(User).filter(User.guild_id == guild_id).all()]
 
 
 @app.post("/api/users/{user_id}/role")
-def update_role(user_id: str, role: str, db: Session = Depends(get_db), user=Depends(require_user)):
-    target = db.query(User).get(user_id)
+def update_role(user_id: str, guild_id: str, role: str, db: Session = Depends(get_db), user=Depends(require_guild_access)):
+    target = db.query(User).filter(User.id == user_id, User.guild_id == guild_id).first()
     if not target:
         raise HTTPException(404, "Benutzer nicht gefunden")
     target.role = role
-    log(db, "system", f"Rolle von {target.username} geändert zu {role}")
+    log(db, guild_id, "system", f"Rolle von {target.username} geändert zu {role}")
     db.commit()
     return {"ok": True}
 
 
 @app.post("/api/users/{user_id}/balance")
-def adjust_balance(user_id: str, delta: int, db: Session = Depends(get_db), user=Depends(require_user)):
-    target = db.query(User).get(user_id)
+def adjust_balance(user_id: str, guild_id: str, delta: int, db: Session = Depends(get_db), user=Depends(require_guild_access)):
+    target = db.query(User).filter(User.id == user_id, User.guild_id == guild_id).first()
     if not target:
         raise HTTPException(404, "Benutzer nicht gefunden")
     target.balance += delta
-    log(db, "system", f"Guthaben von {target.username} um {delta} ₡ angepasst")
+    log(db, guild_id, "system", f"Guthaben von {target.username} um {delta} ₡ angepasst")
     db.commit()
     return {"ok": True, "balance": target.balance}
 
 
 # ---------- AFK-System ----------
 @app.get("/api/afk")
-def afk_list(db: Session = Depends(get_db)):
-    users = db.query(User).filter(User.afk_reason.isnot(None)).all()
+def afk_list(guild_id: str, db: Session = Depends(get_db)):
+    users_ = db.query(User).filter(User.guild_id == guild_id, User.afk_reason.isnot(None)).all()
     return [
         {"id": u.id, "name": u.username, "reason": u.afk_reason,
          "since": u.afk_since.isoformat() if u.afk_since else None}
-        for u in users
+        for u in users_
     ]
 
 
 @app.get("/api/afk/me")
-def afk_me(db: Session = Depends(get_db), user=Depends(require_user)):
-    me = get_or_create_user_by_id(db, user["sub"], user.get("username", "Dashboard"))
+def afk_me(guild_id: str, db: Session = Depends(get_db), user=Depends(require_user)):
+    me = get_or_create_user_by_id(db, guild_id, user["sub"], user.get("username", "Dashboard"))
     return {"reason": me.afk_reason, "since": me.afk_since.isoformat() if me.afk_since else None}
 
 
 @app.post("/api/afk/set")
-def afk_set(grund: str = "Kein Grund angegeben", db: Session = Depends(get_db), user=Depends(require_user)):
-    me = get_or_create_user_by_id(db, user["sub"], user.get("username", "Dashboard"))
+def afk_set(guild_id: str, grund: str = "Kein Grund angegeben", db: Session = Depends(get_db), user=Depends(require_guild_access)):
+    me = get_or_create_user_by_id(db, guild_id, user["sub"], user.get("username", "Dashboard"))
     me.afk_reason = grund
     me.afk_since = datetime.now(timezone.utc)
-    log(db, "system", f"{me.username} ist jetzt AFK (über Dashboard): {grund}")
+    log(db, guild_id, "system", f"{me.username} ist jetzt AFK (über Dashboard): {grund}")
     db.commit()
     return {"ok": True}
 
 
 @app.post("/api/afk/clear")
-def afk_clear(db: Session = Depends(get_db), user=Depends(require_user)):
-    me = get_or_create_user_by_id(db, user["sub"], user.get("username", "Dashboard"))
+def afk_clear(guild_id: str, db: Session = Depends(get_db), user=Depends(require_guild_access)):
+    me = get_or_create_user_by_id(db, guild_id, user["sub"], user.get("username", "Dashboard"))
     me.afk_reason = None
     me.afk_since = None
-    log(db, "system", f"{me.username} hat AFK beendet (über Dashboard)")
+    log(db, guild_id, "system", f"{me.username} hat AFK beendet (über Dashboard)")
     db.commit()
     return {"ok": True}
 
@@ -1056,38 +1102,45 @@ def mask_ip(ip: str) -> str:
 
 
 @app.get("/api/security/sessions")
-def security_sessions(db: Session = Depends(get_db), user=Depends(require_user)):
-    sessions = db.query(LoginSession).order_by(LoginSession.created_at.desc()).limit(20).all()
+def security_sessions(guild_id: str, db: Session = Depends(get_db), user=Depends(require_user)):
+    # Logins sind serverübergreifend, daher zeigen wir hier nur die Logins von
+    # Mitgliedern des aktuell ausgewählten Servers.
+    member_ids = {u.discord_id for u in db.query(User).filter(User.guild_id == guild_id).all()}
+    sessions = db.query(LoginSession).order_by(LoginSession.created_at.desc()).limit(100).all()
+    filtered = [s for s in sessions if s.user_id in member_ids][:20]
     return [
         {"user": s.username, "device": simplify_user_agent(s.user_agent), "ip": mask_ip(s.ip),
          "time": s.created_at.isoformat()}
-        for s in sessions
+        for s in filtered
     ]
 
 
 @app.get("/api/security/overview")
-def security_overview(db: Session = Depends(get_db)):
-    admin_count = db.query(func.count(User.id)).filter(User.role.in_(["Admin", "Owner"])).scalar() or 0
-    login_count_24h = db.query(func.count(LoginSession.id)).filter(
-        LoginSession.created_at >= datetime.now(timezone.utc) - timedelta(hours=24)
-    ).scalar() or 0
+def security_overview(guild_id: str, db: Session = Depends(get_db)):
+    admin_count = db.query(func.count(User.id)).filter(User.guild_id == guild_id, User.role.in_(["Admin", "Owner"])).scalar() or 0
+    member_ids = {u.discord_id for u in db.query(User).filter(User.guild_id == guild_id).all()}
+    logins = db.query(LoginSession).filter(LoginSession.created_at >= datetime.now(timezone.utc) - timedelta(hours=24)).all()
+    login_count_24h = len([l for l in logins if l.user_id in member_ids])
     return {"admin_count": admin_count, "logins_24h": login_count_24h}
 
 
 # ---------- Einstellungen ----------
 @app.get("/api/settings")
-def get_settings(db: Session = Depends(get_db)):
-    return {s.key: s.value for s in db.query(Setting).all()}
+def get_settings(guild_id: str, db: Session = Depends(get_db)):
+    prefix = f"{guild_id}:"
+    rows = db.query(Setting).filter(Setting.key.like(f"{prefix}%")).all()
+    return {s.key[len(prefix):]: s.value for s in rows}
 
 
 @app.post("/api/settings")
-def update_settings(payload: dict, db: Session = Depends(get_db), user=Depends(require_user)):
+def update_settings(guild_id: str, payload: dict, db: Session = Depends(get_db), user=Depends(require_guild_access)):
     for key, value in payload.items():
-        setting = db.query(Setting).get(key)
+        full_key = gkey(guild_id, key)
+        setting = db.query(Setting).get(full_key)
         if setting:
             setting.value = str(value)
         else:
-            db.add(Setting(key=key, value=str(value)))
-    log(db, "system", f"Einstellungen geändert: {', '.join(payload.keys())}")
+            db.add(Setting(key=full_key, value=str(value)))
+    log(db, guild_id, "system", f"Einstellungen geändert: {', '.join(payload.keys())}")
     db.commit()
     return {"ok": True}
