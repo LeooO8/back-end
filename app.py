@@ -742,7 +742,12 @@ def my_guilds(user=Depends(require_user)):
 @app.get("/api/guild-info")
 def guild_info(guild_id: str, db: Session = Depends(get_db)):
     guild = bot.get_guild(int(guild_id)) if guild_id.isdigit() else None
-    return {"id": guild_id, "name": guild.name if guild else None, "exists": guild is not None}
+    return {
+        "id": guild_id,
+        "name": guild.name if guild else None,
+        "icon_url": str(guild.icon.url) if guild and guild.icon else None,
+        "exists": guild is not None,
+    }
 
 
 # ---------- Übersicht ----------
