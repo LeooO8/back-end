@@ -750,6 +750,22 @@ def guild_info(guild_id: str, db: Session = Depends(get_db)):
     }
 
 
+@app.get("/api/guild-channels")
+def guild_channels(guild_id: str):
+    guild = bot.get_guild(int(guild_id)) if guild_id.isdigit() else None
+    if not guild:
+        return []
+    return [{"id": str(ch.id), "name": ch.name} for ch in guild.text_channels]
+
+
+@app.get("/api/guild-roles")
+def guild_roles(guild_id: str):
+    guild = bot.get_guild(int(guild_id)) if guild_id.isdigit() else None
+    if not guild:
+        return []
+    return [{"id": str(r.id), "name": r.name} for r in guild.roles if r.name != "@everyone"]
+
+
 # ---------- Übersicht ----------
 @app.get("/api/overview")
 def overview(guild_id: str, db: Session = Depends(get_db)):
