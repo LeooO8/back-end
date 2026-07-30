@@ -673,7 +673,7 @@ async def callback(code: str, request: Request):
     db.close()
 
     session_token = jwt.encode(
-        {"sub": discord_user["id"], "username": discord_user["username"],
+        {"sub": discord_user["id"], "username": discord_user["username"], "avatar": discord_user.get("avatar"),
          "exp": int(time.time()) + 60 * 60 * 24 * 7},
         JWT_SECRET, algorithm="HS256",
     )
