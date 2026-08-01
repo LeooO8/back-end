@@ -145,6 +145,8 @@ async def on_ready():
 
         if not check_expired_giveaways.is_running():
             check_expired_giveaways.start()
+        if not apply_daily_interest.is_running():
+            apply_daily_interest.start()
     except Exception as e:
         print(f"Fehler beim Synchronisieren der Slash-Commands: {e}")
 
@@ -234,6 +236,51 @@ async def check_expired_giveaways():
         expired = db.query(Giveaway).filter(Giveaway.status == "aktiv", Giveaway.ends_at <= now).all()
         for g in expired:
             await draw_giveaway_winner(db, g)
+    finally:
+        db.close()
+
+
+@tasks.loop(hours=1)
+async def apply_daily_interest():
+    """Zahlt einmal pro Tag pro Server Zinsen auf alle Bankguthaben aus,
+    falls unter Einstellungen ein Zinssatz (%) hinterlegt ist. Läuft
+    stündlich, wendet die Zinsen aber pro Server nur einmal pro Tag an
+    (unabhängig davon, wie oft der Bot zwischendurch neu startet)."""
+    db = SessionLocal()
+    try:
+        today = datetime.now(timezone.utc).date().isoformat()
+        for guild in bot.guilds:
+            guild_id = str(guild.id)
+            rate = get_setting_value(db, guild_id, "zinssatz_taeglich")
+            if not rate:
+                continue
+            try:
+                rate_val = float(rate)
+            except (TypeError, ValueError):
+                continue
+            if rate_val <= 0:
+                continue
+
+            last_applied = get_setting_value(db, guild_id, "_zinsen_zuletzt")
+            if last_applied == today:
+                continue  # heute schon ausgezahlt
+
+            users = db.query(User).filter(User.guild_id == guild_id).all()
+            for u in users:
+                if u.balance <= 0:
+                    continue
+                zins = round(u.balance * rate_val / 100)
+                if zins > 0:
+                    u.balance += zins
+                    db.add(Transaction(guild_id=guild_id, from_user="Zinsen", to_user=u.username, amount=zins, type="Zinsen"))
+
+            setting = db.query(Setting).get(gkey(guild_id, "_zinsen_zuletzt"))
+            if setting:
+                setting.value = today
+            else:
+                db.add(Setting(key=gkey(guild_id, "_zinsen_zuletzt"), value=today))
+            log(db, guild_id, "bank", f"Tägliche Zinsen ({rate_val}%) an alle Nutzer ausgezahlt")
+            db.commit()
     finally:
         db.close()
 
