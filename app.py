@@ -374,7 +374,7 @@ async def balance_cmd(interaction: discord.Interaction):
     try:
         user = get_or_create_user(db, interaction.user)
         await interaction.response.send_message(
-            f"💰 Bankguthaben: **{user.balance:,} ₡**\n💵 Bargeld: **{user.cash:,} ₡**".replace(",", ".")
+            f"💰 Kontostand: **{user.balance:,} ₡**\n💵 Bargeld: **{user.cash:,} ₡**".replace(",", ".")
         )
     finally:
         db.close()
@@ -597,7 +597,10 @@ async def view_balance_cmd(interaction: discord.Interaction, mitglied: discord.M
     try:
         target = get_or_create_user(db, mitglied)
         await interaction.response.send_message(
-            f"💰 Kontostand von {mitglied.mention}: **{target.balance:,} ₡**".replace(",", "."), ephemeral=True
+            f"💰 {mitglied.mention}\n"
+            f"Kontostand: **{target.balance:,} ₡**\n"
+            f"Bargeld: **{target.cash:,} ₡**".replace(",", "."),
+            ephemeral=True,
         )
     finally:
         db.close()
