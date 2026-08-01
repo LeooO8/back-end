@@ -83,7 +83,7 @@ def get_or_create_user_by_id(db, guild_id: str, discord_id: str, username: str) 
         start = get_starting_balance(db, guild_id)
         user = User(id=uid, guild_id=str(guild_id), discord_id=str(discord_id), username=username, balance=start)
         db.add(user)
-        db.add(LogEntry(guild_id=str(guild_id), type="system", text=f"{username} wurde neu angelegt (Startguthaben {start} ₡)"))
+        log(db, str(guild_id), "system", f"{username} wurde neu angelegt (Startguthaben {start} ₡)")
         db.commit()
     user.last_seen = datetime.now(timezone.utc)
     db.commit()
@@ -96,6 +96,35 @@ def get_or_create_user(db, member: discord.Member) -> User:
 
 def log(db: Session, guild_id: str, type_: str, text: str):
     db.add(LogEntry(guild_id=str(guild_id), type=type_, text=text))
+    _post_log_to_channel(guild_id, type_, text)
+
+
+def _post_log_to_channel(guild_id, type_: str, text: str):
+    """Postet den Log-Eintrag zusätzlich in den Log-Kanal, falls einer eingestellt ist.
+    Funktioniert sicher sowohl aus normalen als auch aus asynchronen Aufrufen heraus."""
+    try:
+        if not bot.is_ready() or not bot.loop or not bot.loop.is_running():
+            return
+        db2 = SessionLocal()
+        try:
+            channel_id = get_setting_value(db2, guild_id, "log_kanal")
+        finally:
+            db2.close()
+        if not channel_id:
+            return
+
+        async def _send():
+            try:
+                channel = bot.get_channel(int(channel_id)) or await bot.fetch_channel(int(channel_id))
+                embed = discord.Embed(description=text, color=0x7C8798)
+                embed.set_footer(text=type_.upper())
+                await channel.send(embed=embed)
+            except Exception as e:
+                print(f"Log-Kanal-Post fehlgeschlagen: {e}")
+
+        asyncio.run_coroutine_threadsafe(_send(), bot.loop)
+    except Exception as e:
+        print(f"Log-Kanal-Vorbereitung fehlgeschlagen: {e}")
 
 
 @bot.event
@@ -183,8 +212,7 @@ async def draw_giveaway_winner(db, giveaway: Giveaway):
         winner_name = winner_user.username if winner_user else winner_discord_id
     giveaway.status = "beendet"
     giveaway.winner = winner_name
-    db.add(LogEntry(guild_id=giveaway.guild_id, type="system",
-                     text=f"Giveaway '{giveaway.prize}' beendet — Gewinner: {winner_name or 'niemand teilgenommen'}"))
+    log(db, giveaway.guild_id, "system", f"Giveaway '{giveaway.prize}' beendet — Gewinner: {winner_name or 'niemand teilgenommen'}")
     db.commit()
 
     if giveaway.channel_id and bot.is_ready():
@@ -269,8 +297,7 @@ async def giveaway_create_cmd(interaction: discord.Interaction, preis: str, daue
         g = Giveaway(guild_id=str(interaction.guild_id), prize=preis, status="aktiv", ends_at=ends_at,
                      channel_id=str(interaction.channel.id), message_id=str(message.id), participants="")
         db.add(g)
-        db.add(LogEntry(guild_id=str(interaction.guild_id), type="system",
-                         text=f"{interaction.user.display_name} hat ein Giveaway gestartet: {preis}"))
+        log(db, str(interaction.guild_id), "system", f"{interaction.user.display_name} hat ein Giveaway gestartet: {preis}")
         db.commit()
     finally:
         db.close()
@@ -329,7 +356,7 @@ async def on_message(message: discord.Message):
         if me and me.afk_reason:
             me.afk_reason = None
             me.afk_since = None
-            db.add(LogEntry(guild_id=guild_id, type="afk", text=f"{me.username} ist nicht mehr AFK (automatisch erkannt)"))
+            log(db, guild_id, "afk", f"{me.username} ist nicht mehr AFK (automatisch erkannt)")
             db.commit()
             try:
                 await message.channel.send(f"👋 Willkommen zurück, {message.author.mention}! Dein AFK-Status wurde entfernt.")
@@ -361,7 +388,7 @@ async def afk_cmd(interaction: discord.Interaction, grund: str = "Kein Grund ang
         user = get_or_create_user(db, interaction.user)
         user.afk_reason = grund
         user.afk_since = datetime.now(timezone.utc)
-        db.add(LogEntry(guild_id=str(interaction.guild_id), type="afk", text=f"{user.username} ist jetzt AFK: {grund}"))
+        log(db, str(interaction.guild_id), "afk", f"{user.username} ist jetzt AFK: {grund}")
         db.commit()
         await interaction.response.send_message(f"😴 {interaction.user.mention} ist jetzt AFK: {grund}")
     finally:
@@ -393,7 +420,7 @@ async def deposit_cmd(interaction: discord.Interaction, betrag: int):
         user.cash -= betrag
         user.balance += betrag
         db.add(Transaction(guild_id=str(interaction.guild_id), from_user=user.username, to_user=user.username, amount=betrag, type="Einzahlung"))
-        db.add(LogEntry(guild_id=str(interaction.guild_id), type="bank", text=f"{user.username} hat {betrag} ₡ eingezahlt"))
+        log(db, str(interaction.guild_id), "bank", f"{user.username} hat {betrag} ₡ eingezahlt")
         db.commit()
         await interaction.response.send_message(f"✅ {betrag:,} ₡ eingezahlt. Neues Bankguthaben: **{user.balance:,} ₡**".replace(",", "."))
     finally:
@@ -413,7 +440,7 @@ async def withdraw_cmd(interaction: discord.Interaction, betrag: int):
         user.balance -= betrag
         user.cash += betrag
         db.add(Transaction(guild_id=str(interaction.guild_id), from_user=user.username, to_user=user.username, amount=betrag, type="Auszahlung"))
-        db.add(LogEntry(guild_id=str(interaction.guild_id), type="bank", text=f"{user.username} hat {betrag} ₡ abgehoben"))
+        log(db, str(interaction.guild_id), "bank", f"{user.username} hat {betrag} ₡ abgehoben")
         db.commit()
         await interaction.response.send_message(f"✅ {betrag:,} ₡ abgehoben. Neues Bargeld: **{user.cash:,} ₡**".replace(",", "."))
     finally:
@@ -437,7 +464,7 @@ async def transfer_cmd(interaction: discord.Interaction, empfaenger: discord.Mem
         sender.balance -= betrag
         receiver.balance += betrag
         db.add(Transaction(guild_id=str(interaction.guild_id), from_user=sender.username, to_user=receiver.username, amount=betrag, type="Überweisung"))
-        db.add(LogEntry(guild_id=str(interaction.guild_id), type="bank", text=f"{sender.username} überwies {betrag} ₡ an {receiver.username}"))
+        log(db, str(interaction.guild_id), "bank", f"{sender.username} überwies {betrag} ₡ an {receiver.username}")
         db.commit()
         await interaction.response.send_message(f"✅ {betrag:,} ₡ an {empfaenger.mention} überwiesen.".replace(",", "."))
     finally:
@@ -473,7 +500,7 @@ async def buy_cmd(interaction: discord.Interaction, artikel: str):
         user.balance -= item.price
         item.sold += 1
         db.add(Transaction(guild_id=str(interaction.guild_id), from_user=user.username, to_user="Shop", amount=item.price, type="Kauf"))
-        db.add(LogEntry(guild_id=str(interaction.guild_id), type="shop", text=f"{user.username} kaufte '{item.name}'"))
+        log(db, str(interaction.guild_id), "shop", f"{user.username} kaufte '{item.name}'")
         db.commit()
 
         role_note = ""
@@ -518,7 +545,7 @@ async def work_cmd(
         user.balance += verdienst
         user.last_work = now
         db.add(Transaction(guild_id=str(interaction.guild_id), from_user=f"Job:{job}", to_user=user.username, amount=verdienst, type="Arbeit"))
-        db.add(LogEntry(guild_id=str(interaction.guild_id), type="system", text=f"{user.username} hat als {job} gearbeitet und {verdienst} ₡ verdient"))
+        log(db, str(interaction.guild_id), "system", f"{user.username} hat als {job} gearbeitet und {verdienst} ₡ verdient")
         db.commit()
         await interaction.response.send_message(f"💼 Du hast als **{job}** gearbeitet und **{verdienst} ₡** verdient!")
     finally:
@@ -542,7 +569,7 @@ async def daily_cmd(interaction: discord.Interaction):
         user.balance += DAILY_AMOUNT
         user.last_daily = now
         db.add(Transaction(guild_id=str(interaction.guild_id), from_user="Täglicher Bonus", to_user=user.username, amount=DAILY_AMOUNT, type="Daily"))
-        db.add(LogEntry(guild_id=str(interaction.guild_id), type="system", text=f"{user.username} hat den täglichen Bonus abgeholt"))
+        log(db, str(interaction.guild_id), "system", f"{user.username} hat den täglichen Bonus abgeholt")
         db.commit()
         await interaction.response.send_message(f"🎁 Du hast deinen täglichen Bonus von **{DAILY_AMOUNT} ₡** abgeholt!")
     finally:
@@ -560,7 +587,7 @@ async def give_money_cmd(interaction: discord.Interaction, mitglied: discord.Mem
         target = get_or_create_user(db, mitglied)
         target.balance += betrag
         db.add(Transaction(guild_id=str(interaction.guild_id), from_user=f"Admin:{interaction.user.display_name}", to_user=target.username, amount=betrag, type="Admin-Gutschrift"))
-        db.add(LogEntry(guild_id=str(interaction.guild_id), type="system", text=f"{interaction.user.display_name} hat {mitglied.display_name} {betrag} ₡ gegeben"))
+        log(db, str(interaction.guild_id), "system", f"{interaction.user.display_name} hat {mitglied.display_name} {betrag} ₡ gegeben")
         db.commit()
         await interaction.response.send_message(
             f"✅ {mitglied.mention} hat **{betrag:,} ₡** erhalten. Neuer Kontostand: **{target.balance:,} ₡**".replace(",", ".")
@@ -580,7 +607,7 @@ async def remove_money_cmd(interaction: discord.Interaction, mitglied: discord.M
         target = get_or_create_user(db, mitglied)
         target.balance -= betrag
         db.add(Transaction(guild_id=str(interaction.guild_id), from_user=target.username, to_user=f"Admin:{interaction.user.display_name}", amount=betrag, type="Admin-Abzug"))
-        db.add(LogEntry(guild_id=str(interaction.guild_id), type="system", text=f"{interaction.user.display_name} hat {mitglied.display_name} {betrag} ₡ abgezogen"))
+        log(db, str(interaction.guild_id), "system", f"{interaction.user.display_name} hat {mitglied.display_name} {betrag} ₡ abgezogen")
         db.commit()
         await interaction.response.send_message(
             f"✅ {mitglied.mention} wurden **{betrag:,} ₡** abgezogen. Neuer Kontostand: **{target.balance:,} ₡**".replace(",", ".")
@@ -675,7 +702,7 @@ def toggle_duty_for_user(db, guild_id: str, user: User, fraction_name: str):
         f.on_duty += 1
         status = "im Dienst"
 
-    db.add(LogEntry(guild_id=guild_id, type="dienst", text=f"{user.username} ist jetzt {status} bei {f.name}"))
+    log(db, guild_id, "dienst", f"{user.username} ist jetzt {status} bei {f.name}")
     db.commit()
     return f, status, paid
 
@@ -752,7 +779,7 @@ async def callback(code: str, request: Request):
         discord_user = user_res.json()
 
     db = SessionLocal()
-    db.add(LogEntry(guild_id=None, type="login", text=f"{discord_user['username']} hat sich über Discord angemeldet"))
+    log(db, None, "login", f"{discord_user['username']} hat sich über Discord angemeldet")
 
     client_ip = request.headers.get("x-forwarded-for", request.client.host if request.client else "unbekannt").split(",")[0].strip()
     user_agent = request.headers.get("user-agent", "unbekannt")
