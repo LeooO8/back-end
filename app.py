@@ -53,6 +53,11 @@ def gkey(guild_id, key) -> str:
     return f"{guild_id}:{key}"
 
 
+def get_setting_value(db, guild_id, key, default=None):
+    s = db.query(Setting).get(gkey(guild_id, key))
+    return s.value if s and s.value not in (None, "") else default
+
+
 # =========================================================
 # TEIL 1: DER DISCORD-BOT
 # =========================================================
@@ -324,6 +329,7 @@ async def on_message(message: discord.Message):
         if me and me.afk_reason:
             me.afk_reason = None
             me.afk_since = None
+            db.add(LogEntry(guild_id=guild_id, type="afk", text=f"{me.username} ist nicht mehr AFK (automatisch erkannt)"))
             db.commit()
             try:
                 await message.channel.send(f"👋 Willkommen zurück, {message.author.mention}! Dein AFK-Status wurde entfernt.")
@@ -355,6 +361,7 @@ async def afk_cmd(interaction: discord.Interaction, grund: str = "Kein Grund ang
         user = get_or_create_user(db, interaction.user)
         user.afk_reason = grund
         user.afk_since = datetime.now(timezone.utc)
+        db.add(LogEntry(guild_id=str(interaction.guild_id), type="afk", text=f"{user.username} ist jetzt AFK: {grund}"))
         db.commit()
         await interaction.response.send_message(f"😴 {interaction.user.mention} ist jetzt AFK: {grund}")
     finally:
@@ -366,7 +373,49 @@ async def balance_cmd(interaction: discord.Interaction):
     db = SessionLocal()
     try:
         user = get_or_create_user(db, interaction.user)
-        await interaction.response.send_message(f"💰 Dein Kontostand: **{user.balance:,} ₡**".replace(",", "."))
+        await interaction.response.send_message(
+            f"💰 Bankguthaben: **{user.balance:,} ₡**\n💵 Bargeld: **{user.cash:,} ₡**".replace(",", ".")
+        )
+    finally:
+        db.close()
+
+
+@bot.tree.command(name="einzahlen", description="Zahlt Bargeld auf dein Bankkonto ein")
+@app_commands.describe(betrag="Wie viel Bargeld eingezahlt werden soll")
+async def deposit_cmd(interaction: discord.Interaction, betrag: int):
+    if betrag <= 0:
+        return await interaction.response.send_message("Der Betrag muss positiv sein.", ephemeral=True)
+    db = SessionLocal()
+    try:
+        user = get_or_create_user(db, interaction.user)
+        if user.cash < betrag:
+            return await interaction.response.send_message("❌ Nicht genug Bargeld.", ephemeral=True)
+        user.cash -= betrag
+        user.balance += betrag
+        db.add(Transaction(guild_id=str(interaction.guild_id), from_user=user.username, to_user=user.username, amount=betrag, type="Einzahlung"))
+        db.add(LogEntry(guild_id=str(interaction.guild_id), type="bank", text=f"{user.username} hat {betrag} ₡ eingezahlt"))
+        db.commit()
+        await interaction.response.send_message(f"✅ {betrag:,} ₡ eingezahlt. Neues Bankguthaben: **{user.balance:,} ₡**".replace(",", "."))
+    finally:
+        db.close()
+
+
+@bot.tree.command(name="auszahlen", description="Hebt Guthaben von deinem Bankkonto als Bargeld ab")
+@app_commands.describe(betrag="Wie viel Guthaben abgehoben werden soll")
+async def withdraw_cmd(interaction: discord.Interaction, betrag: int):
+    if betrag <= 0:
+        return await interaction.response.send_message("Der Betrag muss positiv sein.", ephemeral=True)
+    db = SessionLocal()
+    try:
+        user = get_or_create_user(db, interaction.user)
+        if user.balance < betrag:
+            return await interaction.response.send_message("❌ Nicht genug Bankguthaben.", ephemeral=True)
+        user.balance -= betrag
+        user.cash += betrag
+        db.add(Transaction(guild_id=str(interaction.guild_id), from_user=user.username, to_user=user.username, amount=betrag, type="Auszahlung"))
+        db.add(LogEntry(guild_id=str(interaction.guild_id), type="bank", text=f"{user.username} hat {betrag} ₡ abgehoben"))
+        db.commit()
+        await interaction.response.send_message(f"✅ {betrag:,} ₡ abgehoben. Neues Bargeld: **{user.cash:,} ₡**".replace(",", "."))
     finally:
         db.close()
 
@@ -378,6 +427,9 @@ async def transfer_cmd(interaction: discord.Interaction, empfaenger: discord.Mem
         return await interaction.response.send_message("Der Betrag muss positiv sein.", ephemeral=True)
     db = SessionLocal()
     try:
+        max_transfer = get_setting_value(db, interaction.guild_id, "max_ueberweisung")
+        if max_transfer and betrag > int(max_transfer):
+            return await interaction.response.send_message(f"❌ Maximal erlaubter Betrag: {int(max_transfer):,} ₡".replace(",", "."), ephemeral=True)
         sender = get_or_create_user(db, interaction.user)
         receiver = get_or_create_user(db, empfaenger)
         if sender.balance < betrag:
@@ -423,7 +475,19 @@ async def buy_cmd(interaction: discord.Interaction, artikel: str):
         db.add(Transaction(guild_id=str(interaction.guild_id), from_user=user.username, to_user="Shop", amount=item.price, type="Kauf"))
         db.add(LogEntry(guild_id=str(interaction.guild_id), type="shop", text=f"{user.username} kaufte '{item.name}'"))
         db.commit()
-        await interaction.response.send_message(f"✅ Du hast **{item.name}** gekauft.")
+
+        role_note = ""
+        if item.role_id:
+            try:
+                role = interaction.guild.get_role(int(item.role_id))
+                if role:
+                    await interaction.user.add_roles(role)
+                    role_note = f" Die Rolle **{role.name}** wurde dir vergeben."
+            except Exception as e:
+                role_note = " (Rolle konnte nicht vergeben werden — Bot-Berechtigungen prüfen.)"
+                print(f"Rollenvergabe fehlgeschlagen: {e}")
+
+        await interaction.response.send_message(f"✅ Du hast **{item.name}** gekauft.{role_note}")
     finally:
         db.close()
 
@@ -568,6 +632,51 @@ async def post_duty_embed(fraction: DutyFraction, changed_by: str):
         print(f"Konnte Dienst-Embed nicht senden: {e}")
 
 
+def toggle_duty_for_user(db, guild_id: str, user: User, fraction_name: str):
+    """Schaltet den Dienststatus eines Nutzers um. Zählt beim Abtreten die
+    tatsächlich geleistete Zeit zur Fraktion dazu und zahlt (falls in den
+    Einstellungen eine Vergütung/Stunde hinterlegt ist) automatisch aus.
+    Gibt (fraction, status_text, ausgezahlter_betrag) zurück oder wirft ValueError."""
+    if user.on_duty_fraction and user.on_duty_fraction.lower() != fraction_name.lower():
+        raise ValueError(f"Du bist gerade bei **{user.on_duty_fraction}** im Dienst. Geh dort zuerst außer Dienst.")
+
+    f = db.query(DutyFraction).filter(DutyFraction.guild_id == guild_id, DutyFraction.name.ilike(fraction_name)).first()
+    if not f:
+        f = DutyFraction(guild_id=guild_id, name=fraction_name, total=10)
+        db.add(f)
+        db.commit()
+
+    paid = 0
+    if user.on_duty_fraction:
+        # Abtreten: geleistete Zeit berechnen und gutschreiben
+        started = user.duty_started_at
+        if started:
+            started = started.replace(tzinfo=timezone.utc) if started.tzinfo is None else started
+            hours = max(0.0, (datetime.now(timezone.utc) - started).total_seconds() / 3600)
+            f.hours_today = round((f.hours_today or 0) + hours, 2)
+            rate = get_setting_value(db, guild_id, "dienst_verguetung")
+            if rate:
+                paid = round(float(rate) * hours)
+                if paid > 0:
+                    user.balance += paid
+                    db.add(Transaction(guild_id=guild_id, from_user="Dienstlohn", to_user=user.username, amount=paid, type="Dienstlohn"))
+        user.on_duty_fraction = None
+        user.duty_started_at = None
+        f.on_duty = max(0, f.on_duty - 1)
+        status = "außer Dienst"
+    else:
+        if f.total and f.on_duty >= f.total:
+            raise ValueError(f"Bei **{f.name}** sind schon alle Plätze belegt ({f.on_duty}/{f.total}).")
+        user.on_duty_fraction = fraction_name
+        user.duty_started_at = datetime.now(timezone.utc)
+        f.on_duty += 1
+        status = "im Dienst"
+
+    db.add(LogEntry(guild_id=guild_id, type="dienst", text=f"{user.username} ist jetzt {status} bei {f.name}"))
+    db.commit()
+    return f, status, paid
+
+
 @bot.tree.command(name="dienst", description="Dienst antreten oder abtreten für eine Fraktion")
 @app_commands.describe(fraktion="Welche Fraktion")
 async def duty_cmd(
@@ -578,36 +687,12 @@ async def duty_cmd(
     try:
         guild_id = str(interaction.guild_id)
         user = get_or_create_user(db, interaction.user)
-
-        if user.on_duty_fraction and user.on_duty_fraction.lower() != fraktion.lower():
-            return await interaction.response.send_message(
-                f"❌ Du bist gerade bei **{user.on_duty_fraction}** im Dienst. "
-                f"Geh dort zuerst mit /dienst außer Dienst, bevor du bei **{fraktion}** antrittst.",
-                ephemeral=True,
-            )
-
-        f = db.query(DutyFraction).filter(DutyFraction.guild_id == guild_id, DutyFraction.name.ilike(fraktion)).first()
-        if not f:
-            f = DutyFraction(guild_id=guild_id, name=fraktion, total=10)
-            db.add(f)
-            db.commit()
-
-        if user.on_duty_fraction:
-            user.on_duty_fraction = None
-            f.on_duty = max(0, f.on_duty - 1)
-            status = "außer Dienst"
-        else:
-            if f.total and f.on_duty >= f.total:
-                return await interaction.response.send_message(
-                    f"❌ Bei **{f.name}** sind schon alle Plätze belegt ({f.on_duty}/{f.total}).", ephemeral=True
-                )
-            user.on_duty_fraction = fraktion
-            f.on_duty += 1
-            status = "im Dienst"
-
-        db.add(LogEntry(guild_id=guild_id, type="dienst", text=f"{interaction.user.display_name} ist jetzt {status} bei {f.name}"))
-        db.commit()
-        await interaction.response.send_message(f"👮 {f.name}: **{status}** ({f.on_duty}/{f.total}).")
+        try:
+            f, status, paid = toggle_duty_for_user(db, guild_id, user, fraktion)
+        except ValueError as e:
+            return await interaction.response.send_message(f"❌ {e}", ephemeral=True)
+        pay_note = f" Du hast **{paid:,} ₡** Dienstlohn erhalten.".replace(",", ".") if paid else ""
+        await interaction.response.send_message(f"👮 {f.name}: **{status}** ({f.on_duty}/{f.total}).{pay_note}")
         await post_duty_embed(f, interaction.user.display_name)
     finally:
         db.close()
@@ -787,7 +872,7 @@ def overview(guild_id: str, db: Session = Depends(get_db)):
 # ---------- Bank ----------
 @app.get("/api/bank/accounts")
 def bank_accounts(guild_id: str, db: Session = Depends(get_db)):
-    return [{"id": u.id, "name": u.username, "balance": u.balance, "role": u.role}
+    return [{"id": u.id, "name": u.username, "balance": u.balance, "cash": u.cash, "role": u.role}
             for u in db.query(User).filter(User.guild_id == guild_id).order_by(User.balance.desc()).all()]
 
 
@@ -802,6 +887,9 @@ def bank_transactions(guild_id: str, db: Session = Depends(get_db)):
 def bank_transfer_dashboard(guild_id: str, empfaenger_id: str, betrag: int, db: Session = Depends(get_db), user=Depends(require_guild_access)):
     if betrag <= 0:
         raise HTTPException(400, "Der Betrag muss positiv sein.")
+    max_transfer = get_setting_value(db, guild_id, "max_ueberweisung")
+    if max_transfer and betrag > int(max_transfer):
+        raise HTTPException(400, f"Maximal erlaubter Betrag: {int(max_transfer)} ₡")
     sender = get_or_create_user_by_id(db, guild_id, user["sub"], user.get("username", "Dashboard"))
     receiver = db.query(User).get(empfaenger_id)
     if not receiver:
@@ -818,16 +906,46 @@ def bank_transfer_dashboard(guild_id: str, empfaenger_id: str, betrag: int, db: 
     return {"ok": True, "balance": sender.balance}
 
 
+@app.post("/api/bank/deposit")
+def bank_deposit_dashboard(guild_id: str, betrag: int, db: Session = Depends(get_db), user=Depends(require_guild_access)):
+    if betrag <= 0:
+        raise HTTPException(400, "Der Betrag muss positiv sein.")
+    me = get_or_create_user_by_id(db, guild_id, user["sub"], user.get("username", "Dashboard"))
+    if me.cash < betrag:
+        raise HTTPException(400, "Nicht genug Bargeld.")
+    me.cash -= betrag
+    me.balance += betrag
+    db.add(Transaction(guild_id=guild_id, from_user=me.username, to_user=me.username, amount=betrag, type="Einzahlung"))
+    log(db, guild_id, "bank", f"{me.username} hat {betrag} ₡ eingezahlt (über Dashboard)")
+    db.commit()
+    return {"ok": True, "balance": me.balance, "cash": me.cash}
+
+
+@app.post("/api/bank/withdraw")
+def bank_withdraw_dashboard(guild_id: str, betrag: int, db: Session = Depends(get_db), user=Depends(require_guild_access)):
+    if betrag <= 0:
+        raise HTTPException(400, "Der Betrag muss positiv sein.")
+    me = get_or_create_user_by_id(db, guild_id, user["sub"], user.get("username", "Dashboard"))
+    if me.balance < betrag:
+        raise HTTPException(400, "Nicht genug Bankguthaben.")
+    me.balance -= betrag
+    me.cash += betrag
+    db.add(Transaction(guild_id=guild_id, from_user=me.username, to_user=me.username, amount=betrag, type="Auszahlung"))
+    log(db, guild_id, "bank", f"{me.username} hat {betrag} ₡ abgehoben (über Dashboard)")
+    db.commit()
+    return {"ok": True, "balance": me.balance, "cash": me.cash}
+
+
 # ---------- Shop ----------
 @app.get("/api/shop/items")
 def shop_items(guild_id: str, db: Session = Depends(get_db)):
-    return [{"id": i.id, "name": i.name, "category": i.category, "price": i.price, "sold": i.sold}
+    return [{"id": i.id, "name": i.name, "category": i.category, "price": i.price, "sold": i.sold, "roleId": i.role_id}
             for i in db.query(ShopItem).filter(ShopItem.guild_id == guild_id).all()]
 
 
 @app.post("/api/shop/items")
-def create_item(guild_id: str, name: str, category: str, price: int, db: Session = Depends(get_db), user=Depends(require_guild_access)):
-    item = ShopItem(guild_id=guild_id, name=name, category=category, price=price)
+def create_item(guild_id: str, name: str, category: str, price: int, role_id: str | None = None, db: Session = Depends(get_db), user=Depends(require_guild_access)):
+    item = ShopItem(guild_id=guild_id, name=name, category=category, price=price, role_id=role_id or None)
     db.add(item)
     log(db, guild_id, "shop", f"Neuer Artikel erstellt: {name} ({price} ₡)")
     db.commit()
@@ -835,11 +953,11 @@ def create_item(guild_id: str, name: str, category: str, price: int, db: Session
 
 
 @app.post("/api/shop/items/{item_id}")
-def update_item(item_id: int, guild_id: str, name: str, category: str, price: int, db: Session = Depends(get_db), user=Depends(require_guild_access)):
+def update_item(item_id: int, guild_id: str, name: str, category: str, price: int, role_id: str | None = None, db: Session = Depends(get_db), user=Depends(require_guild_access)):
     item = db.query(ShopItem).filter(ShopItem.id == item_id, ShopItem.guild_id == guild_id).first()
     if not item:
         raise HTTPException(404, "Artikel nicht gefunden")
-    item.name, item.category, item.price = name, category, price
+    item.name, item.category, item.price, item.role_id = name, category, price, (role_id or None)
     log(db, guild_id, "shop", f"Artikel bearbeitet: {name} ({price} ₡)")
     db.commit()
     return {"ok": True}
@@ -872,30 +990,18 @@ def dienst_me(guild_id: str, db: Session = Depends(get_db), user=Depends(require
 
 @app.post("/api/dienst/{fraction_id}/toggle")
 async def toggle_dienst(fraction_id: int, guild_id: str, db: Session = Depends(get_db), user=Depends(require_guild_access)):
-    f = db.query(DutyFraction).filter(DutyFraction.id == fraction_id, DutyFraction.guild_id == guild_id).first()
-    if not f:
+    f_check = db.query(DutyFraction).filter(DutyFraction.id == fraction_id, DutyFraction.guild_id == guild_id).first()
+    if not f_check:
         raise HTTPException(404, "Fraktion nicht gefunden")
 
     me = get_or_create_user_by_id(db, guild_id, user["sub"], user.get("username", "Dashboard"))
+    try:
+        f, status, paid = toggle_duty_for_user(db, guild_id, me, f_check.name)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
 
-    if me.on_duty_fraction and me.on_duty_fraction.lower() != f.name.lower():
-        raise HTTPException(400, f"Du bist bereits bei {me.on_duty_fraction} im Dienst. Geh dort zuerst außer Dienst.")
-
-    if me.on_duty_fraction:
-        me.on_duty_fraction = None
-        f.on_duty = max(0, f.on_duty - 1)
-        status = "außer Dienst"
-    else:
-        if f.total and f.on_duty >= f.total:
-            raise HTTPException(400, f"Bei {f.name} sind schon alle Plätze belegt ({f.on_duty}/{f.total}).")
-        me.on_duty_fraction = f.name
-        f.on_duty += 1
-        status = "im Dienst"
-
-    log(db, guild_id, "dienst", f"{me.username} ist jetzt {status} bei {f.name}")
-    db.commit()
     await post_duty_embed(f, me.username)
-    return {"ok": True, "onDutyFraction": me.on_duty_fraction}
+    return {"ok": True, "onDutyFraction": me.on_duty_fraction, "paid": paid}
 
 
 @app.post("/api/dienst")
@@ -1005,6 +1111,7 @@ def stats(guild_id: str, db: Session = Depends(get_db)):
         "duty_hours_today": db.query(func.sum(DutyFraction.hours_today)).filter(DutyFraction.guild_id == guild_id).scalar() or 0,
         "giveaway_count": db.query(func.count(Giveaway.id)).filter(Giveaway.guild_id == guild_id).scalar() or 0,
         "weekly_activity": weekly_activity,
+        "uptime_seconds": (datetime.now(timezone.utc) - BOT_START_TIME).total_seconds(),
     }
 
 
@@ -1023,8 +1130,9 @@ def compute_status(last_seen) -> str:
 
 @app.get("/api/users")
 def users(guild_id: str, db: Session = Depends(get_db)):
-    return [{"id": u.id, "name": u.username, "role": u.role, "balance": u.balance,
-             "status": compute_status(u.last_seen), "joined": u.joined_at.isoformat()}
+    return [{"id": u.id, "name": u.username, "role": u.role, "balance": u.balance, "cash": u.cash,
+             "status": compute_status(u.last_seen), "joined": u.joined_at.isoformat(),
+             "onDutyFraction": u.on_duty_fraction, "afkReason": u.afk_reason}
             for u in db.query(User).filter(User.guild_id == guild_id).all()]
 
 
@@ -1072,7 +1180,7 @@ def afk_set(guild_id: str, grund: str = "Kein Grund angegeben", db: Session = De
     me = get_or_create_user_by_id(db, guild_id, user["sub"], user.get("username", "Dashboard"))
     me.afk_reason = grund
     me.afk_since = datetime.now(timezone.utc)
-    log(db, guild_id, "system", f"{me.username} ist jetzt AFK (über Dashboard): {grund}")
+    log(db, guild_id, "afk", f"{me.username} ist jetzt AFK (über Dashboard): {grund}")
     db.commit()
     return {"ok": True}
 
@@ -1082,7 +1190,7 @@ def afk_clear(guild_id: str, db: Session = Depends(get_db), user=Depends(require
     me = get_or_create_user_by_id(db, guild_id, user["sub"], user.get("username", "Dashboard"))
     me.afk_reason = None
     me.afk_since = None
-    log(db, guild_id, "system", f"{me.username} hat AFK beendet (über Dashboard)")
+    log(db, guild_id, "afk", f"{me.username} hat AFK beendet (über Dashboard)")
     db.commit()
     return {"ok": True}
 
