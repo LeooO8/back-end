@@ -28,6 +28,8 @@ class User(Base):
     last_seen = Column(DateTime, nullable=True)   # Letzte Interaktion mit dem Bot/Dashboard
     afk_reason = Column(String, nullable=True)    # Grund, falls aktuell AFK (None = nicht AFK)
     afk_since = Column(DateTime, nullable=True)   # Seit wann AFK
+    cash = Column(BigInteger, default=0)          # Bargeld (getrennt vom Bank-Guthaben "balance")
+    duty_started_at = Column(DateTime, nullable=True)  # Wann die aktuelle Dienstschicht begonnen hat
 
 
 class Transaction(Base):
@@ -49,6 +51,7 @@ class ShopItem(Base):
     category = Column(String, nullable=False)
     price = Column(BigInteger, nullable=False)
     sold = Column(Integer, default=0)
+    role_id = Column(String, nullable=True)  # Discord-Rolle, die beim Kauf automatisch vergeben wird
 
 
 class DutyFraction(Base):
