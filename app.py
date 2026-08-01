@@ -103,7 +103,7 @@ def _post_log_to_channel(guild_id, type_: str, text: str):
     """Postet den Log-Eintrag zusätzlich in den Log-Kanal, falls einer eingestellt ist.
     Funktioniert sicher sowohl aus normalen als auch aus asynchronen Aufrufen heraus."""
     try:
-        if not bot.is_ready() or not bot.loop or not bot.loop.is_running():
+        if not bot.is_ready() or not MAIN_LOOP or not MAIN_LOOP.is_running():
             return
         db2 = SessionLocal()
         try:
@@ -122,7 +122,7 @@ def _post_log_to_channel(guild_id, type_: str, text: str):
             except Exception as e:
                 print(f"Log-Kanal-Post fehlgeschlagen: {e}")
 
-        asyncio.run_coroutine_threadsafe(_send(), bot.loop)
+        asyncio.run_coroutine_threadsafe(_send(), MAIN_LOOP)
     except Exception as e:
         print(f"Log-Kanal-Vorbereitung fehlgeschlagen: {e}")
 
@@ -741,8 +741,13 @@ app.add_middleware(
 )
 
 
+MAIN_LOOP = None
+
+
 @app.on_event("startup")
 async def startup():
+    global MAIN_LOOP
+    MAIN_LOOP = asyncio.get_running_loop()
     init_db()
     if DISCORD_BOT_TOKEN:
         asyncio.create_task(bot.start(DISCORD_BOT_TOKEN))
