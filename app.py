@@ -19,6 +19,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Literal
 import httpx
 import jwt
+import uuid
 import discord
 from discord import app_commands
 from discord.ext import commands, tasks
@@ -835,13 +836,15 @@ async def callback(code: str, request: Request):
 
     client_ip = request.headers.get("x-forwarded-for", request.client.host if request.client else "unbekannt").split(",")[0].strip()
     user_agent = request.headers.get("user-agent", "unbekannt")
-    db.add(LoginSession(guild_id=None, user_id=discord_user["id"], username=discord_user["username"], ip=client_ip, user_agent=user_agent))
+    session_id = str(uuid.uuid4())
+    db.add(LoginSession(guild_id=None, user_id=discord_user["id"], username=discord_user["username"],
+                        ip=client_ip, user_agent=user_agent, token=session_id, revoked=""))
     db.commit()
     db.close()
 
     session_token = jwt.encode(
         {"sub": discord_user["id"], "username": discord_user["username"], "avatar": discord_user.get("avatar"),
-         "exp": int(time.time()) + 60 * 60 * 24 * 7},
+         "sid": session_id, "exp": int(time.time()) + 60 * 60 * 24 * 7},
         JWT_SECRET, algorithm="HS256",
     )
     redirect = RedirectResponse(FRONTEND_URL)
@@ -863,7 +866,23 @@ def me(request: Request):
 
 
 @app.post("/auth/logout")
-def logout(response: Response):
+def logout(request: Request, response: Response):
+    token = request.cookies.get("session")
+    if token:
+        try:
+            payload = jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
+            session_id = payload.get("sid")
+            if session_id:
+                db = SessionLocal()
+                try:
+                    session = db.query(LoginSession).filter(LoginSession.token == session_id).first()
+                    if session:
+                        session.revoked = "yes"
+                        db.commit()
+                finally:
+                    db.close()
+        except jwt.PyJWTError:
+            pass
     response.delete_cookie("session", samesite="none", secure=True)
     return {"ok": True}
 
@@ -873,9 +892,20 @@ def require_user(request: Request):
     if not token:
         raise HTTPException(401, "Nicht angemeldet")
     try:
-        return jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
+        payload = jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
     except jwt.PyJWTError:
         raise HTTPException(401, "Sitzung abgelaufen")
+
+    session_id = payload.get("sid")
+    if session_id:
+        db = SessionLocal()
+        try:
+            session = db.query(LoginSession).filter(LoginSession.token == session_id).first()
+            if session and session.revoked == "yes":
+                raise HTTPException(401, "Diese Sitzung wurde beendet. Bitte erneut anmelden.")
+        finally:
+            db.close()
+    return payload
 
 
 def is_guild_member(guild_id: str, discord_user_id: str) -> bool:
@@ -1317,13 +1347,26 @@ def security_sessions(guild_id: str, db: Session = Depends(get_db), user=Depends
     # Logins sind serverübergreifend, daher zeigen wir hier nur die Logins von
     # Mitgliedern des aktuell ausgewählten Servers.
     member_ids = {u.discord_id for u in db.query(User).filter(User.guild_id == guild_id).all()}
-    sessions = db.query(LoginSession).order_by(LoginSession.created_at.desc()).limit(100).all()
+    sessions = db.query(LoginSession).filter(LoginSession.revoked != "yes").order_by(LoginSession.created_at.desc()).limit(100).all()
     filtered = [s for s in sessions if s.user_id in member_ids][:20]
     return [
-        {"user": s.username, "device": simplify_user_agent(s.user_agent), "ip": mask_ip(s.ip),
-         "time": s.created_at.isoformat()}
+        {"id": s.id, "user": s.username, "device": simplify_user_agent(s.user_agent), "ip": mask_ip(s.ip),
+         "time": s.created_at.isoformat(), "isMine": s.user_id == user["sub"]}
         for s in filtered
     ]
+
+
+@app.post("/api/security/sessions/{session_id}/revoke")
+def revoke_session(session_id: int, guild_id: str, db: Session = Depends(get_db), user=Depends(require_user)):
+    session = db.query(LoginSession).get(session_id)
+    if not session:
+        raise HTTPException(404, "Sitzung nicht gefunden")
+    if session.user_id != user["sub"]:
+        raise HTTPException(403, "Du kannst nur deine eigenen Sitzungen beenden.")
+    session.revoked = "yes"
+    log(db, guild_id, "system", f"{session.username} hat eine Sitzung beendet")
+    db.commit()
+    return {"ok": True}
 
 
 @app.get("/api/security/overview")
