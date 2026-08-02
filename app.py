@@ -1344,6 +1344,9 @@ def mask_ip(ip: str) -> str:
 
 @app.get("/api/security/sessions")
 def security_sessions(guild_id: str, db: Session = Depends(get_db), user=Depends(require_user)):
+    # Sicherstellen, dass der eigene Nutzer-Datensatz für diesen Server existiert,
+    # damit die eigene Sitzung auf einem frisch verbundenen Server sofort erscheint.
+    get_or_create_user_by_id(db, guild_id, user["sub"], user.get("username", "Dashboard"))
     # Logins sind serverübergreifend, daher zeigen wir hier nur die Logins von
     # Mitgliedern des aktuell ausgewählten Servers.
     member_ids = {u.discord_id for u in db.query(User).filter(User.guild_id == guild_id).all()}
