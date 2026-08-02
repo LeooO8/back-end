@@ -534,17 +534,18 @@ async def shop_cmd(interaction: discord.Interaction):
 
 @bot.tree.command(name="kaufen", description="Kauft einen Artikel aus dem Shop")
 @app_commands.describe(artikel="Name des Artikels (oder ein Teil davon)")
-async def buy_cmd(interaction: discord.Interaction, artikel: str):
+async def complete_purchase(interaction: discord.Interaction, item_id: int, edit: bool = False):
     db = SessionLocal()
     try:
-        item = db.query(ShopItem).filter(
-            ShopItem.guild_id == str(interaction.guild_id), ShopItem.name.ilike(f"%{artikel}%")
-        ).first()
+        item = db.query(ShopItem).get(item_id)
         if not item:
-            return await interaction.response.send_message("Artikel nicht gefunden.", ephemeral=True)
+            text = "Artikel nicht mehr verfügbar."
+            return await (interaction.response.edit_message(content=text, embed=None, view=None) if edit else interaction.response.send_message(text, ephemeral=True))
         user = get_or_create_user(db, interaction.user)
         if user.balance < item.price:
-            return await interaction.response.send_message("❌ Nicht genug Guthaben.", ephemeral=True)
+            text = "❌ Nicht genug Guthaben."
+            return await (interaction.response.edit_message(content=text, embed=None, view=None) if edit else interaction.response.send_message(text, ephemeral=True))
+
         user.balance -= item.price
         item.sold += 1
         db.add(Transaction(guild_id=str(interaction.guild_id), from_user=user.username, to_user="Shop", amount=item.price, type="Kauf"))
@@ -562,7 +563,59 @@ async def buy_cmd(interaction: discord.Interaction, artikel: str):
                 role_note = " (Rolle konnte nicht vergeben werden — Bot-Berechtigungen prüfen.)"
                 print(f"Rollenvergabe fehlgeschlagen: {e}")
 
-        await interaction.response.send_message(f"✅ Du hast **{item.name}** gekauft.{role_note}")
+        text = f"✅ Du hast **{item.name}** gekauft.{role_note}"
+        if edit:
+            await interaction.response.edit_message(content=text, embed=None, view=None)
+        else:
+            await interaction.response.send_message(text)
+    finally:
+        db.close()
+
+
+class PurchaseConfirmView(discord.ui.View):
+    def __init__(self, item_id: int, buyer_id: int):
+        super().__init__(timeout=30)
+        self.item_id = item_id
+        self.buyer_id = buyer_id
+
+    @discord.ui.button(label="Ja, kaufen", style=discord.ButtonStyle.success)
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.buyer_id:
+            return await interaction.response.send_message("Das ist nicht dein Kauf.", ephemeral=True)
+        await complete_purchase(interaction, self.item_id, edit=True)
+        self.stop()
+
+    @discord.ui.button(label="Abbrechen", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.buyer_id:
+            return await interaction.response.send_message("Das ist nicht dein Kauf.", ephemeral=True)
+        await interaction.response.edit_message(content="❌ Kauf abgebrochen.", embed=None, view=None)
+        self.stop()
+
+
+async def buy_cmd(interaction: discord.Interaction, artikel: str):
+    db = SessionLocal()
+    try:
+        item = db.query(ShopItem).filter(
+            ShopItem.guild_id == str(interaction.guild_id), ShopItem.name.ilike(f"%{artikel}%")
+        ).first()
+        if not item:
+            return await interaction.response.send_message("Artikel nicht gefunden.", ephemeral=True)
+        user = get_or_create_user(db, interaction.user)
+        if user.balance < item.price:
+            return await interaction.response.send_message("❌ Nicht genug Guthaben.", ephemeral=True)
+
+        require_confirm = get_setting_value(db, interaction.guild_id, "shop_kaufbestaetigung")
+        if require_confirm and require_confirm.strip().lower() in ("ja", "yes", "true", "1"):
+            embed = discord.Embed(
+                title="Kauf bestätigen",
+                description=f"Möchtest du **{item.name}** für **{item.price:,} ₡** kaufen?".replace(",", "."),
+                color=0xF2B705,
+            )
+            view = PurchaseConfirmView(item.id, interaction.user.id)
+            return await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
+        await complete_purchase(interaction, item.id)
     finally:
         db.close()
 
