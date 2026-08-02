@@ -39,6 +39,8 @@ def init_db():
             "ALTER TABLE giveaways ADD COLUMN guild_id VARCHAR",
             "ALTER TABLE logs ADD COLUMN guild_id VARCHAR",
             "ALTER TABLE login_sessions ADD COLUMN guild_id VARCHAR",
+            "ALTER TABLE login_sessions ADD COLUMN token VARCHAR",
+            "ALTER TABLE login_sessions ADD COLUMN revoked VARCHAR DEFAULT ''",
             "ALTER TABLE users ADD COLUMN cash BIGINT DEFAULT 0",
             "ALTER TABLE users ADD COLUMN duty_started_at DATETIME",
             "ALTER TABLE shop_items ADD COLUMN role_id VARCHAR",
