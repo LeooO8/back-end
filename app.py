@@ -534,10 +534,7 @@ async def shop_cmd(interaction: discord.Interaction):
 
 @bot.tree.command(name="kaufen", description="Kauft einen Artikel aus dem Shop")
 @app_commands.describe(artikel="Name des Artikels (oder ein Teil davon)")
-async def buy_cmd(
-    interaction: discord.Interaction,
-    artikel: str
-):
+async def complete_purchase(interaction: discord.Interaction, item_id: int, edit: bool = False):
     db = SessionLocal()
     try:
         item = db.query(ShopItem).get(item_id)
