@@ -103,3 +103,5 @@ class LoginSession(Base):
     ip = Column(String, nullable=True)
     user_agent = Column(String, nullable=True)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    token = Column(String, nullable=True, unique=True)  # eindeutige Sitzungs-ID (steckt auch im JWT)
+    revoked = Column(String, default="")  # "yes", falls die Sitzung beendet wurde
