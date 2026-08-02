@@ -533,7 +533,7 @@ async def shop_cmd(interaction: discord.Interaction):
 
 
 @bot.tree.command(name="kaufen", description="Kauft einen Artikel aus dem Shop")
-@app_commands.describe(artikel="Name des Artikels (oder ein Teil davon)")
+await interaction.response.defer(ephemeral=True)@app_commands.describe(artikel="Name des Artikels (oder ein Teil davon)")
 async def complete_purchase(
     interaction: discord.Interaction,
     artikel: str
