@@ -526,8 +526,14 @@ async def shop_cmd(interaction: discord.Interaction):
         items = db.query(ShopItem).filter(ShopItem.guild_id == str(interaction.guild_id)).all()
         if not items:
             return await interaction.response.send_message("Der Shop ist noch leer.")
-        text = "\n".join(f"**{i.name}** — {i.price:,} ₡".replace(",", ".") for i in items)
-        await interaction.response.send_message(f"🛒 **Shop-Artikel:**\n{text}")
+
+        embed = discord.Embed(title="🛒 Shop-Artikel", color=0xF2B705)
+        for i in items:
+            preis = f"{i.price:,} ₡".replace(",", ".")
+            embed.add_field(name=f"{i.name} — ID: {i.id:04d}", value=f"Preis: {preis}", inline=False)
+        embed.set_footer(text="Kauf mit /kaufen item_id:<ID>")
+
+        await interaction.response.send_message(embed=embed)
     finally:
         db.close()
 
