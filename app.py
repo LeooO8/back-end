@@ -91,8 +91,47 @@ def get_or_create_user_by_id(db, guild_id: str, discord_id: str, username: str) 
     return user
 
 
+def sync_admin_role(db, guild: "discord.Guild | None", user: User):
+    """Gleicht user.role automatisch mit der aktuellen Discord-Situation ab:
+    - Der Server-Owner bekommt immer automatisch 'Owner'.
+    - Mitglieder mit der unter Einstellungen hinterlegten Admin-Rolle
+      ('admin_rolle', eine Discord-Rollen-ID) bekommen automatisch 'Admin'.
+    - Verliert ein Nutzer diese Rolle wieder (und ist nicht Owner), wird die
+      Dashboard-Rolle automatisch zurück auf 'Member' gesetzt.
+    Läuft ohne Wirkung, falls der Server oder das Mitglied gerade nicht über
+    den Bot-Cache erreichbar ist (z.B. Bot kurzzeitig offline)."""
+    if not guild:
+        return
+    member = guild.get_member(int(user.discord_id))
+    if not member:
+        return
+
+    if member.id == guild.owner_id:
+        if user.role != "Owner":
+            user.role = "Owner"
+        return
+
+    admin_role_id = get_setting_value(db, str(guild.id), "admin_rolle")
+    has_admin_role = False
+    if admin_role_id:
+        try:
+            has_admin_role = any(str(r.id) == str(admin_role_id) for r in member.roles)
+        except (TypeError, ValueError):
+            has_admin_role = False
+
+    if has_admin_role:
+        if user.role != "Admin":
+            user.role = "Admin"
+    elif user.role == "Admin":
+        # Admin-Rolle wurde in Discord entzogen -> Dashboard-Rolle zurücksetzen
+        user.role = "Member"
+
+
 def get_or_create_user(db, member: discord.Member) -> User:
-    return get_or_create_user_by_id(db, str(member.guild.id), str(member.id), member.display_name)
+    user = get_or_create_user_by_id(db, str(member.guild.id), str(member.id), member.display_name)
+    sync_admin_role(db, member.guild, user)
+    db.commit()
+    return user
 
 
 def log(db: Session, guild_id: str, type_: str, text: str):
@@ -1023,11 +1062,17 @@ def is_guild_member(guild_id: str, discord_user_id: str) -> bool:
     return member is not None
 
 
-def require_guild_access(guild_id: str, user=Depends(require_user)):
+def require_guild_access(guild_id: str, user=Depends(require_user), db: Session = Depends(get_db)):
     """Stellt sicher, dass der eingeloggte Nutzer wirklich Mitglied dieses Servers ist,
-    bevor er dort etwas verändern darf."""
-    if not is_guild_member(guild_id, user["sub"]):
+    bevor er dort etwas verändern darf. Gleicht dabei zugleich die Dashboard-Rolle
+    mit der aktuellen Discord-Rolle/Owner-Status ab."""
+    guild = bot.get_guild(int(guild_id))
+    if not guild or not guild.get_member(int(user["sub"])):
         raise HTTPException(403, "Du bist kein Mitglied dieses Servers.")
+
+    db_user = get_or_create_user_by_id(db, guild_id, user["sub"], user.get("username", "Dashboard"))
+    sync_admin_role(db, guild, db_user)
+    db.commit()
     return user
 
 
