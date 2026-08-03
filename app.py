@@ -148,6 +148,8 @@ async def on_ready():
             check_expired_giveaways.start()
         if not apply_daily_interest.is_running():
             apply_daily_interest.start()
+        if not auto_end_duty.is_running():
+            auto_end_duty.start()
     except Exception as e:
         print(f"Fehler beim Synchronisieren der Slash-Commands: {e}")
 
@@ -227,6 +229,51 @@ async def draw_giveaway_winner(db, giveaway: Giveaway):
                 await channel.send(f"🎉 Das Giveaway für **{giveaway.prize}** ist vorbei — leider hat niemand teilgenommen.")
         except Exception as e:
             print(f"Konnte Giveaway-Ergebnis nicht senden: {e}")
+
+
+@tasks.loop(minutes=1)
+async def auto_end_duty():
+    """Beendet automatisch den Dienst von Nutzern, die länger als die pro
+    Server eingestellte Zeit ('dienst_auto_ende_minuten', in Minuten) im
+    Dienst sind. Nutzt dieselbe Logik wie /dienst (inkl. Auszahlung der
+    geleisteten Stunden) und postet das Ergebnis in den Dienst-Kanal."""
+    db = SessionLocal()
+    try:
+        for guild in bot.guilds:
+            guild_id = str(guild.id)
+            limit_raw = get_setting_value(db, guild_id, "dienst_auto_ende_minuten")
+            if not limit_raw:
+                continue
+            try:
+                limit_minutes = float(limit_raw)
+            except (TypeError, ValueError):
+                continue
+            if limit_minutes <= 0:
+                continue
+
+            now = datetime.now(timezone.utc)
+            cutoff = now - timedelta(minutes=limit_minutes)
+            users_on_duty = db.query(User).filter(
+                User.guild_id == guild_id, User.on_duty_fraction.isnot(None)
+            ).all()
+            for u in users_on_duty:
+                started = u.duty_started_at
+                if not started:
+                    continue
+                started = started.replace(tzinfo=timezone.utc) if started.tzinfo is None else started
+                if started > cutoff:
+                    continue  # noch innerhalb der erlaubten Zeit
+
+                fraction_name = u.on_duty_fraction
+                try:
+                    f, status, paid = toggle_duty_for_user(db, guild_id, u, fraction_name)
+                except ValueError as e:
+                    print(f"Automatisches Dienstende für {u.username} fehlgeschlagen: {e}")
+                    continue
+                log(db, guild_id, "dienst", f"{u.username} wurde nach {int(limit_minutes)} Minuten automatisch außer Dienst gesetzt")
+                await post_duty_embed(f, "Automatisches Dienstende")
+    finally:
+        db.close()
 
 
 @tasks.loop(seconds=30)
