@@ -59,6 +59,31 @@ def get_setting_value(db, guild_id, key, default=None):
     return s.value if s and s.value not in (None, "") else default
 
 
+# ---------- Einheitliches Embed-Design ----------
+BRAND_COLOR = 0xF2B705       # Gold - primäre Aktionen (Käufe, Willkommen, Ankündigungen)
+COLOR_SUCCESS = 0x57F287     # Grün - erfolgreiche Aktionen
+COLOR_DANGER = 0xED4245      # Rot - Fehler/Ablehnungen
+COLOR_INFO = 0x5865F2        # Blurple - neutrale Infos (Dienst, Tickets)
+COLOR_LOG = 0x2B2D31         # Dunkelgrau - Log-Kanal-Einträge
+
+LOG_TYPE_STYLE = {
+    "shop": ("🛒", COLOR_SUCCESS),
+    "bank": ("🏦", COLOR_INFO),
+    "dienst": ("🚔", COLOR_INFO),
+    "afk": ("😴", COLOR_LOG),
+    "login": ("🔐", COLOR_LOG),
+    "system": ("⚙️", COLOR_LOG),
+}
+
+
+def branded_embed(**kwargs) -> discord.Embed:
+    """Baut ein Embed mit einheitlichem Zeitstempel + Footer-Branding."""
+    kwargs.setdefault("color", BRAND_COLOR)
+    embed = discord.Embed(timestamp=datetime.now(timezone.utc), **kwargs)
+    embed.set_footer(text="Server Control Panel")
+    return embed
+
+
 MODULE_NAMES = {
     "bank": "Bank-System",
     "shop": "Shop-System",
@@ -204,8 +229,9 @@ def _post_log_to_channel(guild_id, type_: str, text: str):
         async def _send():
             try:
                 channel = bot.get_channel(int(channel_id)) or await bot.fetch_channel(int(channel_id))
-                embed = discord.Embed(description=text, color=0x7C8798)
-                embed.set_footer(text=type_.upper())
+                icon, color = LOG_TYPE_STYLE.get(type_, ("📋", COLOR_LOG))
+                embed = discord.Embed(description=text, color=color, timestamp=datetime.now(timezone.utc))
+                embed.set_author(name=f"{icon} {type_.capitalize()}")
                 await channel.send(embed=embed)
             except Exception as e:
                 print(f"Log-Kanal-Post fehlgeschlagen: {e}")
@@ -274,12 +300,17 @@ async def on_member_join(member: discord.Member):
                     .replace("{balance}", f"{user.balance:,}".replace(",", "."))
                     .replace("{mitgliederzahl}", str(member.guild.member_count))
                 )
-                embed = discord.Embed(title=f"👋 Willkommen auf {member.guild.name}!", description=text, color=0xF2B705)
+                embed = discord.Embed(
+                    title=f"👋 Willkommen auf {member.guild.name}!", description=text,
+                    color=BRAND_COLOR, timestamp=datetime.now(timezone.utc),
+                )
                 embed.set_thumbnail(url=member.display_avatar.url)
                 banner_url = get_setting_value(db, guild_id, "welcome_banner_url")
                 if banner_url:
                     embed.set_image(url=banner_url)
-                embed.set_footer(text=f"Mitglied #{member.guild.member_count}")
+                embed.add_field(name="💰 Startguthaben", value=f"{user.balance:,} ₡".replace(",", "."), inline=True)
+                embed.add_field(name="👥 Mitgliederzahl", value=f"#{member.guild.member_count}", inline=True)
+                embed.set_footer(text=member.guild.name, icon_url=member.guild.icon.url if member.guild.icon else None)
                 await channel.send(embed=embed)
             except Exception as e:
                 print(f"Konnte Willkommensnachricht nicht senden: {e}")
@@ -332,9 +363,18 @@ async def draw_giveaway_winner(db, giveaway: Giveaway):
         try:
             channel = bot.get_channel(int(giveaway.channel_id)) or await bot.fetch_channel(int(giveaway.channel_id))
             if winner_discord_id:
-                await channel.send(f"🎉 Das Giveaway für **{giveaway.prize}** ist vorbei! Herzlichen Glückwunsch <@{winner_discord_id}>!")
+                embed = discord.Embed(
+                    title="🏆 Giveaway beendet!",
+                    description=f"### 🎁 {giveaway.prize}\n\nHerzlichen Glückwunsch <@{winner_discord_id}>! 🎉",
+                    color=COLOR_SUCCESS, timestamp=datetime.now(timezone.utc),
+                )
             else:
-                await channel.send(f"🎉 Das Giveaway für **{giveaway.prize}** ist vorbei — leider hat niemand teilgenommen.")
+                embed = discord.Embed(
+                    title="🏆 Giveaway beendet!",
+                    description=f"### 🎁 {giveaway.prize}\n\nLeider hat niemand teilgenommen.",
+                    color=COLOR_LOG, timestamp=datetime.now(timezone.utc),
+                )
+            await channel.send(embed=embed)
         except Exception as e:
             print(f"Konnte Giveaway-Ergebnis nicht senden: {e}")
 
@@ -493,10 +533,13 @@ async def giveaway_create_cmd(interaction: discord.Interaction, preis: str, daue
         db_check.close()
     ends_at = datetime.now(timezone.utc) + timedelta(minutes=dauer_minuten)
     embed = discord.Embed(
-        title="🎉 Giveaway!",
-        description=f"Preis: **{preis}**\nReagiere mit {GIVEAWAY_EMOJI}, um teilzunehmen!\nEndet: <t:{int(ends_at.timestamp())}:R>",
-        color=0xF2B705,
+        title="🎉 Giveaway gestartet!",
+        description=f"### 🏆 {preis}\n\nReagiere mit {GIVEAWAY_EMOJI}, um teilzunehmen!",
+        color=BRAND_COLOR, timestamp=datetime.now(timezone.utc),
     )
+    embed.add_field(name="⏰ Endet", value=f"<t:{int(ends_at.timestamp())}:R>", inline=True)
+    embed.add_field(name="🎁 Gestartet von", value=interaction.user.mention, inline=True)
+    embed.set_footer(text="Viel Glück!")
     await interaction.response.send_message(embed=embed)
     message = await interaction.original_response()
     await message.add_reaction(GIVEAWAY_EMOJI)
@@ -704,11 +747,15 @@ async def shop_cmd(interaction: discord.Interaction):
         if not items:
             return await interaction.response.send_message("Der Shop ist noch leer.")
 
-        embed = discord.Embed(title="🛒 Shop-Artikel", color=0xF2B705)
+        embed = discord.Embed(
+            title="🛒 Shop", description=f"**{len(items)}** Artikel verfügbar — kauf mit `/kaufen item_id:<ID>`",
+            color=BRAND_COLOR, timestamp=datetime.now(timezone.utc),
+        )
         for i in items:
             preis = f"{i.price:,} ₡".replace(",", ".")
-            embed.add_field(name=f"{i.name} — ID: {i.id:04d}", value=f"Preis: {preis}", inline=False)
-        embed.set_footer(text="Kauf mit /kaufen item_id:<ID>")
+            embed.add_field(name=f"`{i.id:04d}` · {i.name}", value=f"💰 {preis}", inline=True)
+        if interaction.guild.icon:
+            embed.set_thumbnail(url=interaction.guild.icon.url)
 
         await interaction.response.send_message(embed=embed)
     finally:
@@ -724,22 +771,24 @@ async def complete_purchase(interaction: discord.Interaction, item_id: int, edit
             return await module_disabled_reply(interaction, "shop")
         item = db.query(ShopItem).get(item_id)
         if not item:
-            text = "Artikel nicht mehr verfügbar."
-            return await (interaction.response.edit_message(content=text, embed=None, view=None) if edit else interaction.response.send_message(text, ephemeral=True))
+            embed = discord.Embed(description="❌ Artikel nicht mehr verfügbar.", color=COLOR_DANGER)
+            return await (interaction.response.edit_message(content=None, embed=embed, view=None) if edit else interaction.response.send_message(embed=embed, ephemeral=True))
         user = get_or_create_user(db, interaction.user)
         if user.balance < item.price:
-            text = "❌ Nicht genug Guthaben."
-            return await (interaction.response.edit_message(content=text, embed=None, view=None) if edit else interaction.response.send_message(text, ephemeral=True))
+            embed = discord.Embed(description="❌ Nicht genug Guthaben.", color=COLOR_DANGER)
+            return await (interaction.response.edit_message(content=None, embed=embed, view=None) if edit else interaction.response.send_message(embed=embed, ephemeral=True))
 
         if not edit:
             require_confirm = get_setting_value(db, str(interaction.guild_id), "shop_kaufbestaetigung")
             if require_confirm and require_confirm.strip().lower() in ("ja", "yes", "true", "1"):
                 preis_text = f"{item.price:,} ₡".replace(",", ".")
                 embed = discord.Embed(
-                    title="Kauf bestätigen",
-                    description=f"Möchtest du **{item.name}** für **{preis_text}** kaufen?",
-                    color=0xF2B705,
+                    title="🛍️ Kauf bestätigen",
+                    description=f"### {item.name}\nMöchtest du diesen Artikel wirklich kaufen?",
+                    color=BRAND_COLOR, timestamp=datetime.now(timezone.utc),
                 )
+                embed.add_field(name="💰 Preis", value=preis_text, inline=True)
+                embed.add_field(name="👛 Dein Guthaben danach", value=f"{(user.balance - item.price):,} ₡".replace(",", "."), inline=True)
                 view = PurchaseConfirmView(item.id, interaction.user.id)
                 return await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
@@ -755,16 +804,20 @@ async def complete_purchase(interaction: discord.Interaction, item_id: int, edit
                 role = interaction.guild.get_role(int(item.role_id))
                 if role:
                     await interaction.user.add_roles(role)
-                    role_note = f" Die Rolle **{role.name}** wurde dir vergeben."
+                    role_note = f"\n🎭 Rolle **{role.name}** wurde dir vergeben."
             except Exception as e:
-                role_note = " (Rolle konnte nicht vergeben werden — Bot-Berechtigungen prüfen.)"
+                role_note = "\n⚠️ Rolle konnte nicht vergeben werden — Bot-Berechtigungen prüfen."
                 print(f"Rollenvergabe fehlgeschlagen: {e}")
 
-        text = f"✅ Du hast **{item.name}** gekauft.{role_note}"
+        embed = discord.Embed(
+            title="✅ Kauf erfolgreich", description=f"Du hast **{item.name}** gekauft.{role_note}",
+            color=COLOR_SUCCESS, timestamp=datetime.now(timezone.utc),
+        )
+        embed.add_field(name="👛 Neues Guthaben", value=f"{user.balance:,} ₡".replace(",", "."), inline=True)
         if edit:
-            await interaction.response.edit_message(content=text, embed=None, view=None)
+            await interaction.response.edit_message(content=None, embed=embed, view=None)
         else:
-            await interaction.response.send_message(text)
+            await interaction.response.send_message(embed=embed)
     finally:
         db.close()
 
@@ -920,14 +973,15 @@ async def post_duty_embed(fraction: DutyFraction, changed_by: str):
         return
     try:
         channel = bot.get_channel(int(fraction.channel_id)) or await bot.fetch_channel(int(fraction.channel_id))
-        status = "im Dienst" if fraction.on_duty > 0 else "außer Dienst"
+        on_duty_now = fraction.on_duty > 0
         embed = discord.Embed(
-            title=f"👮 {fraction.name}",
-            description=f"Status geändert von **{changed_by}**",
-            color=0x4ADE80 if fraction.on_duty > 0 else 0x7C8798,
+            title=f"🚔 {fraction.name}",
+            description=f"{'🟢 **Im Dienst**' if on_duty_now else '⚪ **Außer Dienst**'} — geändert von {changed_by}",
+            color=COLOR_SUCCESS if on_duty_now else COLOR_LOG,
+            timestamp=datetime.now(timezone.utc),
         )
-        embed.add_field(name="Status", value=status, inline=True)
-        embed.add_field(name="Im Dienst", value=f"{fraction.on_duty}/{fraction.total}", inline=True)
+        embed.add_field(name="👥 Aktuell im Dienst", value=f"{fraction.on_duty} / {fraction.total}", inline=True)
+        embed.add_field(name="⏱️ Stunden heute", value=f"{fraction.hours_today:.1f} h", inline=True)
         await channel.send(embed=embed)
     except Exception as e:
         print(f"Konnte Dienst-Embed nicht senden: {e}")
@@ -1085,9 +1139,13 @@ async def ticket_cmd(interaction: discord.Interaction, grund: str = "Kein Grund 
         db.commit()
 
         embed = discord.Embed(
-            title="🎫 Neues Ticket", description=f"**Grund:** {grund}\n\nEin Team-Mitglied meldet sich in Kürze.",
-            color=0xF2B705,
+            title="🎫 Neues Support-Ticket",
+            description=f"Hey {interaction.user.mention}, danke für deine Anfrage! Ein Team-Mitglied meldet sich in Kürze.",
+            color=COLOR_INFO, timestamp=datetime.now(timezone.utc),
         )
+        embed.add_field(name="📝 Grund", value=grund, inline=False)
+        embed.set_thumbnail(url=interaction.user.display_avatar.url)
+        embed.set_footer(text=f"Ticket #{ticket.id}")
         await channel.send(content=interaction.user.mention, embed=embed, view=TicketCloseView(ticket.id))
         await interaction.followup.send(f"✅ Dein Ticket wurde erstellt: {channel.mention}", ephemeral=True)
     finally:
@@ -1120,7 +1178,11 @@ async def send_announcement(guild: discord.Guild, guild_id: str, titel: str, nac
     if not channel:
         raise ValueError("Der eingestellte Ankündigungskanal wurde nicht gefunden.")
 
-    embed = discord.Embed(title=f"📢 {titel}", description=nachricht, color=0xF2B705, timestamp=datetime.now(timezone.utc))
+    embed = discord.Embed(
+        title=f"📢 {titel}", description=nachricht, color=BRAND_COLOR, timestamp=datetime.now(timezone.utc),
+    )
+    embed.set_author(name=guild.name, icon_url=guild.icon.url if guild.icon else None)
+    embed.set_footer(text="Ankündigung")
     content = rolle.mention if rolle else None
     await channel.send(content=content, embed=embed)
     return channel
@@ -1617,10 +1679,12 @@ async def create_giveaway_dashboard(guild_id: str, preis: str, dauer_minuten: in
 
     ends_at = datetime.now(timezone.utc) + timedelta(minutes=dauer_minuten)
     embed = discord.Embed(
-        title="🎉 Giveaway!",
-        description=f"Preis: **{preis}**\nReagiere mit {GIVEAWAY_EMOJI}, um teilzunehmen!\nEndet: <t:{int(ends_at.timestamp())}:R>",
-        color=0xF2B705,
+        title="🎉 Giveaway gestartet!",
+        description=f"### 🏆 {preis}\n\nReagiere mit {GIVEAWAY_EMOJI}, um teilzunehmen!",
+        color=BRAND_COLOR, timestamp=datetime.now(timezone.utc),
     )
+    embed.add_field(name="⏰ Endet", value=f"<t:{int(ends_at.timestamp())}:R>", inline=True)
+    embed.set_footer(text="Viel Glück!")
     message = await channel.send(embed=embed)
     await message.add_reaction(GIVEAWAY_EMOJI)
 
