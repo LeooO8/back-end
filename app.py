@@ -247,19 +247,40 @@ async def on_member_join(member: discord.Member):
     db = SessionLocal()
     try:
         user = get_or_create_user(db, member)
+        guild_id = str(member.guild.id)
 
-        channel = member.guild.system_channel
+        channel = None
+        channel_id = get_setting_value(db, guild_id, "willkommen_kanal")
+        if channel_id:
+            channel = member.guild.get_channel(int(channel_id))
+        if channel is None:
+            channel = member.guild.system_channel
         if channel is None:
             for ch in member.guild.text_channels:
                 perms = ch.permissions_for(member.guild.me)
                 if perms.send_messages:
                     channel = ch
                     break
+
         if channel:
             try:
-                await channel.send(
-                    f"👋 Willkommen {member.mention}! Du hast ein Startguthaben von **{user.balance:,} ₡** erhalten.".replace(",", ".")
+                template = get_setting_value(
+                    db, guild_id, "willkommen_text",
+                    default="Schön, dass du da bist, {user}! Du hast ein Startguthaben von **{balance} ₡** erhalten.",
                 )
+                text = (
+                    template.replace("{user}", member.mention)
+                    .replace("{server}", member.guild.name)
+                    .replace("{balance}", f"{user.balance:,}".replace(",", "."))
+                    .replace("{mitgliederzahl}", str(member.guild.member_count))
+                )
+                embed = discord.Embed(title=f"👋 Willkommen auf {member.guild.name}!", description=text, color=0xF2B705)
+                embed.set_thumbnail(url=member.display_avatar.url)
+                banner_url = get_setting_value(db, guild_id, "welcome_banner_url")
+                if banner_url:
+                    embed.set_image(url=banner_url)
+                embed.set_footer(text=f"Mitglied #{member.guild.member_count}")
+                await channel.send(embed=embed)
             except Exception as e:
                 print(f"Konnte Willkommensnachricht nicht senden: {e}")
     finally:
@@ -1085,6 +1106,37 @@ async def ticket_close_cmd(interaction: discord.Interaction):
     await close_ticket(interaction, ticket.id, closed_by=interaction.user.display_name)
 
 
+async def send_announcement(guild: discord.Guild, guild_id: str, titel: str, nachricht: str, rolle: "discord.Role | None" = None) -> discord.TextChannel:
+    """Baut das Ankündigungs-Embed und postet es in den eingestellten Kanal.
+    Wirft ValueError, falls kein Kanal konfiguriert oder gefunden wurde."""
+    db = SessionLocal()
+    try:
+        channel_id = get_setting_value(db, guild_id, "ankuendigungskanal")
+    finally:
+        db.close()
+    if not channel_id:
+        raise ValueError("Es ist kein Ankündigungskanal eingestellt (siehe Einstellungen → Rollen & Kanäle).")
+    channel = guild.get_channel(int(channel_id))
+    if not channel:
+        raise ValueError("Der eingestellte Ankündigungskanal wurde nicht gefunden.")
+
+    embed = discord.Embed(title=f"📢 {titel}", description=nachricht, color=0xF2B705, timestamp=datetime.now(timezone.utc))
+    content = rolle.mention if rolle else None
+    await channel.send(content=content, embed=embed)
+    return channel
+
+
+@bot.tree.command(name="ankuendigen", description="Sendet eine Ankündigung in den eingestellten Ankündigungskanal")
+@app_commands.describe(titel="Überschrift der Ankündigung", nachricht="Der eigentliche Text", rolle="Optional: Rolle, die gepingt werden soll")
+@app_commands.checks.has_permissions(administrator=True)
+async def announce_cmd(interaction: discord.Interaction, titel: str, nachricht: str, rolle: discord.Role = None):
+    try:
+        channel = await send_announcement(interaction.guild, str(interaction.guild_id), titel, nachricht, rolle)
+    except ValueError as e:
+        return await interaction.response.send_message(f"❌ {e}", ephemeral=True)
+    await interaction.response.send_message(f"✅ Ankündigung gesendet in {channel.mention}.", ephemeral=True)
+
+
 # =========================================================
 # TEIL 2: DIE DASHBOARD-API
 # =========================================================
@@ -1318,6 +1370,27 @@ def overview(guild_id: str, db: Session = Depends(get_db)):
         "uptime_seconds": uptime_seconds,
         "recent_logs": [{"id": l.id, "type": l.type, "text": l.text, "time": l.created_at.isoformat()} for l in recent],
     }
+
+
+# ---------- Ankündigungen ----------
+@app.post("/api/announce")
+async def announce_dashboard(guild_id: str, titel: str, nachricht: str, user=Depends(require_guild_access)):
+    if not bot.is_ready():
+        raise HTTPException(503, "Der Bot ist gerade nicht verbunden.")
+    guild = bot.get_guild(int(guild_id))
+    if not guild:
+        raise HTTPException(404, "Server nicht gefunden.")
+    try:
+        channel = await send_announcement(guild, guild_id, titel, nachricht)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    db = SessionLocal()
+    try:
+        log(db, guild_id, "system", f"Ankündigung gesendet von {user.get('username', 'Dashboard')}: {titel}")
+        db.commit()
+    finally:
+        db.close()
+    return {"ok": True, "channel": channel.name}
 
 
 # ---------- Bot-Steuerung ----------
