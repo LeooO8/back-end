@@ -1331,8 +1331,29 @@ async def sync_commands(guild_id: str, user=Depends(require_guild_access)):
 # ---------- Bank ----------
 @app.get("/api/bank/accounts")
 def bank_accounts(guild_id: str, db: Session = Depends(get_db)):
-    return [{"id": u.id, "name": u.username, "balance": u.balance, "cash": u.cash, "role": u.role}
-            for u in db.query(User).filter(User.guild_id == guild_id).order_by(User.balance.desc()).all()]
+    """Zeigt ALLE echten Discord-Mitglieder mit Kontostand, nicht nur die,
+    die schon mal einen Bot-Befehl genutzt oder sich im Dashboard angemeldet
+    haben. Mitglieder ohne DB-Eintrag bekommen das Startguthaben angezeigt."""
+    guild = bot.get_guild(int(guild_id)) if guild_id.isdigit() else None
+    db_users = {u.discord_id: u for u in db.query(User).filter(User.guild_id == guild_id).all()}
+
+    if not guild:
+        accounts = [{"id": u.id, "name": u.username, "balance": u.balance, "cash": u.cash, "role": u.role} for u in db_users.values()]
+        return sorted(accounts, key=lambda a: a["balance"], reverse=True)
+
+    accounts = []
+    for member in guild.members:
+        if member.bot:
+            continue
+        u = db_users.get(str(member.id))
+        if u:
+            accounts.append({"id": u.id, "name": u.username, "balance": u.balance, "cash": u.cash, "role": u.role})
+        else:
+            accounts.append({
+                "id": f"{guild_id}:{member.id}", "name": member.display_name,
+                "balance": get_starting_balance(db, guild_id), "cash": 0, "role": "Mitglied",
+            })
+    return sorted(accounts, key=lambda a: a["balance"], reverse=True)
 
 
 @app.get("/api/bank/transactions")
@@ -1352,7 +1373,12 @@ def bank_transfer_dashboard(guild_id: str, empfaenger_id: str, betrag: int, db: 
     sender = get_or_create_user_by_id(db, guild_id, user["sub"], user.get("username", "Dashboard"))
     receiver = db.query(User).get(empfaenger_id)
     if not receiver:
-        raise HTTPException(404, "Empfänger nicht gefunden")
+        discord_id = empfaenger_id.split(":", 1)[1] if ":" in empfaenger_id else empfaenger_id
+        guild = bot.get_guild(int(guild_id)) if guild_id.isdigit() else None
+        member = guild.get_member(int(discord_id)) if guild else None
+        if not member:
+            raise HTTPException(404, "Empfänger nicht gefunden")
+        receiver = get_or_create_user_by_id(db, guild_id, discord_id, member.display_name)
     if sender.id == receiver.id:
         raise HTTPException(400, "Du kannst nicht an dich selbst überweisen.")
     if sender.balance < betrag:
