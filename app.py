@@ -1632,17 +1632,53 @@ def compute_status(last_seen) -> str:
 
 @app.get("/api/users")
 def users(guild_id: str, db: Session = Depends(get_db)):
-    return [{"id": u.id, "name": u.username, "role": u.role, "balance": u.balance, "cash": u.cash,
+    """Zeigt ALLE echten Discord-Mitglieder, nicht nur die, die schon mal
+    einen Bot-Befehl genutzt oder sich im Dashboard angemeldet haben.
+    Mitglieder ohne DB-Eintrag bekommen Standardwerte (Startguthaben etc.)."""
+    guild = bot.get_guild(int(guild_id)) if guild_id.isdigit() else None
+    db_users = {u.discord_id: u for u in db.query(User).filter(User.guild_id == guild_id).all()}
+
+    if not guild:
+        # Bot gerade nicht verbunden -> Notlösung: nur bekannte DB-Einträge zeigen
+        return [
+            {"id": u.id, "name": u.username, "role": u.role, "balance": u.balance, "cash": u.cash,
              "status": compute_status(u.last_seen), "joined": u.joined_at.isoformat(),
              "onDutyFraction": u.on_duty_fraction, "afkReason": u.afk_reason}
-            for u in db.query(User).filter(User.guild_id == guild_id).all()]
+            for u in db_users.values()
+        ]
+
+    result = []
+    for member in guild.members:
+        if member.bot:
+            continue
+        u = db_users.get(str(member.id))
+        if u:
+            result.append({
+                "id": u.id, "name": u.username, "role": u.role, "balance": u.balance, "cash": u.cash,
+                "status": compute_status(u.last_seen), "joined": u.joined_at.isoformat(),
+                "onDutyFraction": u.on_duty_fraction, "afkReason": u.afk_reason,
+            })
+        else:
+            result.append({
+                "id": f"{guild_id}:{member.id}", "name": member.display_name, "role": "Mitglied",
+                "balance": get_starting_balance(db, guild_id), "cash": 0, "status": "offline",
+                "joined": (member.joined_at or datetime.now(timezone.utc)).isoformat(),
+                "onDutyFraction": None, "afkReason": None,
+            })
+    return result
 
 
 @app.post("/api/users/{user_id}/role")
 def update_role(user_id: str, guild_id: str, role: str, db: Session = Depends(get_db), user=Depends(require_guild_access)):
     target = db.query(User).filter(User.id == user_id, User.guild_id == guild_id).first()
     if not target:
-        raise HTTPException(404, "Benutzer nicht gefunden")
+        # Mitglied hat noch keinen DB-Eintrag (z.B. noch nie mit dem Bot interagiert) -> anlegen
+        discord_id = user_id.split(":", 1)[1] if ":" in user_id else user_id
+        guild = bot.get_guild(int(guild_id)) if guild_id.isdigit() else None
+        member = guild.get_member(int(discord_id)) if guild else None
+        if not member:
+            raise HTTPException(404, "Benutzer nicht gefunden")
+        target = get_or_create_user_by_id(db, guild_id, discord_id, member.display_name)
     target.role = role
     log(db, guild_id, "system", f"Rolle von {target.username} geändert zu {role}")
     db.commit()
@@ -1719,7 +1755,12 @@ def delete_todo(todo_id: int, guild_id: str, db: Session = Depends(get_db), user
 def adjust_balance(user_id: str, guild_id: str, delta: int, db: Session = Depends(get_db), user=Depends(require_guild_access)):
     target = db.query(User).filter(User.id == user_id, User.guild_id == guild_id).first()
     if not target:
-        raise HTTPException(404, "Benutzer nicht gefunden")
+        discord_id = user_id.split(":", 1)[1] if ":" in user_id else user_id
+        guild = bot.get_guild(int(guild_id)) if guild_id.isdigit() else None
+        member = guild.get_member(int(discord_id)) if guild else None
+        if not member:
+            raise HTTPException(404, "Benutzer nicht gefunden")
+        target = get_or_create_user_by_id(db, guild_id, discord_id, member.display_name)
     target.balance += delta
     log(db, guild_id, "system", f"Guthaben von {target.username} um {delta} ₡ angepasst")
     db.commit()
