@@ -1286,11 +1286,26 @@ def guild_categories(guild_id: str):
     return [{"id": str(c.id), "name": c.name} for c in guild.categories]
 
 
+def compute_total_balance(db, guild_id: str, guild) -> int:
+    """Guthaben-Summe über ALLE echten Mitglieder - inkl. Startguthaben für
+    Mitglieder ohne DB-Eintrag, damit das konsistent mit der Bank-Kontenliste ist."""
+    db_users = {u.discord_id: u.balance for u in db.query(User).filter(User.guild_id == guild_id).all()}
+    if not guild:
+        return sum(db_users.values())
+    starting = get_starting_balance(db, guild_id)
+    total = 0
+    for member in guild.members:
+        if member.bot:
+            continue
+        total += db_users.get(str(member.id), starting)
+    return total
+
+
 # ---------- Übersicht ----------
 @app.get("/api/overview")
 def overview(guild_id: str, db: Session = Depends(get_db)):
-    total_balance = db.query(func.sum(User.balance)).filter(User.guild_id == guild_id).scalar() or 0
     guild = bot.get_guild(int(guild_id)) if guild_id.isdigit() else None
+    total_balance = compute_total_balance(db, guild_id, guild)
     member_count = guild.member_count if guild else (db.query(func.count(User.id)).filter(User.guild_id == guild_id).scalar() or 0)
     on_duty = db.query(func.sum(DutyFraction.on_duty)).filter(DutyFraction.guild_id == guild_id).scalar() or 0
     recent = db.query(LogEntry).filter(LogEntry.guild_id == guild_id).order_by(LogEntry.created_at.desc()).limit(5).all()
@@ -1634,7 +1649,7 @@ def stats(guild_id: str, db: Session = Depends(get_db)):
     return {
         "member_count": (bot.get_guild(int(guild_id)).member_count if guild_id.isdigit() and bot.get_guild(int(guild_id)) else (db.query(func.count(User.id)).filter(User.guild_id == guild_id).scalar() or 0)),
         "active_users_7d": active_users,
-        "total_balance": db.query(func.sum(User.balance)).filter(User.guild_id == guild_id).scalar() or 0,
+        "total_balance": compute_total_balance(db, guild_id, bot.get_guild(int(guild_id)) if guild_id.isdigit() else None),
         "shop_sales": db.query(func.sum(ShopItem.sold)).filter(ShopItem.guild_id == guild_id).scalar() or 0,
         "duty_hours_today": db.query(func.sum(DutyFraction.hours_today)).filter(DutyFraction.guild_id == guild_id).scalar() or 0,
         "giveaway_count": db.query(func.count(Giveaway.id)).filter(Giveaway.guild_id == guild_id).scalar() or 0,
