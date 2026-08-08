@@ -30,7 +30,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import func
 
 from database import get_db, init_db, SessionLocal
-from models import User, Transaction, ShopItem, DutyFraction, Giveaway, LogEntry, Setting, LoginSession
+from models import User, Transaction, ShopItem, DutyFraction, Giveaway, LogEntry, Setting, LoginSession, Ticket
 
 # ---------- Konfiguration (kommt aus Umgebungsvariablen, siehe README) ----------
 DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
@@ -65,6 +65,7 @@ MODULE_NAMES = {
     "dienst": "Dienst-System",
     "afk": "AFK-System",
     "giveaways": "Giveaways",
+    "tickets": "Tickets",
 }
 
 
@@ -297,14 +298,14 @@ async def draw_giveaway_winner(db, giveaway: Giveaway):
 @tasks.loop(minutes=1)
 async def auto_end_duty():
     """Beendet automatisch den Dienst von Nutzern, die länger als die pro
-    Server eingestellte Zeit ('dienst_auto_ende_minuten', in Minuten) im
+    Server eingestellte Zeit ('dienst_auto_ende', in Minuten) im
     Dienst sind. Nutzt dieselbe Logik wie /dienst (inkl. Auszahlung der
     geleisteten Stunden) und postet das Ergebnis in den Dienst-Kanal."""
     db = SessionLocal()
     try:
         for guild in bot.guilds:
             guild_id = str(guild.id)
-            limit_raw = get_setting_value(db, guild_id, "dienst_auto_ende_minuten")
+            limit_raw = get_setting_value(db, guild_id, "dienst_auto_ende")
             if not limit_raw:
                 continue
             try:
@@ -956,6 +957,111 @@ async def duty_cmd(
         db.close()
 
 
+# ---------- Ticket-System ----------
+class TicketCloseView(discord.ui.View):
+    """Wird in den Ticket-Kanal gepostet - der Button schließt das Ticket."""
+    def __init__(self, ticket_id: int):
+        super().__init__(timeout=None)
+        self.ticket_id = ticket_id
+
+    @discord.ui.button(label="Ticket schließen", style=discord.ButtonStyle.danger, custom_id="close_ticket")
+    async def close(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await close_ticket(interaction, self.ticket_id, closed_by=interaction.user.display_name)
+
+
+async def close_ticket(interaction: discord.Interaction, ticket_id: int, closed_by: str):
+    db = SessionLocal()
+    try:
+        ticket = db.query(Ticket).get(ticket_id)
+        if not ticket or ticket.status == "geschlossen":
+            return await interaction.response.send_message("Dieses Ticket ist bereits geschlossen.", ephemeral=True)
+        ticket.status = "geschlossen"
+        ticket.closed_at = datetime.now(timezone.utc)
+        ticket.closed_by = closed_by
+        log(db, ticket.guild_id, "system", f"Ticket #{ticket.id} ({ticket.username}) wurde von {closed_by} geschlossen")
+        db.commit()
+
+        await interaction.response.send_message(f"🔒 Ticket geschlossen von {closed_by}. Der Kanal wird in 5 Sekunden archiviert.")
+        channel = interaction.guild.get_channel(int(ticket.channel_id)) if ticket.channel_id else None
+        if channel:
+            await asyncio.sleep(5)
+            try:
+                await channel.delete(reason=f"Ticket geschlossen von {closed_by}")
+            except Exception as e:
+                print(f"Ticket-Kanal konnte nicht gelöscht werden: {e}")
+    finally:
+        db.close()
+
+
+@bot.tree.command(name="ticket", description="Öffnet ein neues Support-Ticket")
+@app_commands.describe(grund="Worum geht es? (kurz)")
+async def ticket_cmd(interaction: discord.Interaction, grund: str = "Kein Grund angegeben"):
+    db = SessionLocal()
+    try:
+        guild_id = str(interaction.guild_id)
+        if not is_module_enabled(db, guild_id, "tickets"):
+            return await module_disabled_reply(interaction, "tickets")
+
+        # Nur ein offenes Ticket pro Nutzer gleichzeitig
+        existing = db.query(Ticket).filter(
+            Ticket.guild_id == guild_id, Ticket.user_id == str(interaction.user.id), Ticket.status == "offen"
+        ).first()
+        if existing:
+            return await interaction.response.send_message("❌ Du hast bereits ein offenes Ticket.", ephemeral=True)
+
+        await interaction.response.defer(ephemeral=True)
+
+        overwrites = {
+            interaction.guild.default_role: discord.PermissionOverwrite(view_channel=False),
+            interaction.user: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True),
+            interaction.guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True),
+        }
+        support_role_id = get_setting_value(db, guild_id, "ticket_support_rolle")
+        if support_role_id:
+            role = interaction.guild.get_role(int(support_role_id))
+            if role:
+                overwrites[role] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
+
+        category = None
+        category_id = get_setting_value(db, guild_id, "ticket_kategorie")
+        if category_id:
+            category = interaction.guild.get_channel(int(category_id))
+
+        channel_name = f"ticket-{interaction.user.name}".lower().replace(" ", "-")[:90]
+        channel = await interaction.guild.create_text_channel(
+            channel_name, category=category, overwrites=overwrites, reason=f"Ticket von {interaction.user.display_name}"
+        )
+
+        ticket = Ticket(
+            guild_id=guild_id, user_id=str(interaction.user.id), username=interaction.user.display_name,
+            subject=grund, status="offen", channel_id=str(channel.id),
+        )
+        db.add(ticket)
+        log(db, guild_id, "system", f"{interaction.user.display_name} hat ein Ticket eröffnet: {grund}")
+        db.commit()
+
+        embed = discord.Embed(
+            title="🎫 Neues Ticket", description=f"**Grund:** {grund}\n\nEin Team-Mitglied meldet sich in Kürze.",
+            color=0xF2B705,
+        )
+        await channel.send(content=interaction.user.mention, embed=embed, view=TicketCloseView(ticket.id))
+        await interaction.followup.send(f"✅ Dein Ticket wurde erstellt: {channel.mention}", ephemeral=True)
+    finally:
+        db.close()
+
+
+@bot.tree.command(name="ticket_schliessen", description="Schließt das aktuelle Ticket (nur im Ticket-Kanal nutzbar)")
+async def ticket_close_cmd(interaction: discord.Interaction):
+    db = SessionLocal()
+    try:
+        ticket = db.query(Ticket).filter(Ticket.channel_id == str(interaction.channel_id), Ticket.status == "offen").first()
+        if not ticket:
+            return await interaction.response.send_message("Das ist kein offener Ticket-Kanal.", ephemeral=True)
+    finally:
+        db.close()
+    await close_ticket(interaction, ticket.id, closed_by=interaction.user.display_name)
+
+
 # =========================================================
 # TEIL 2: DIE DASHBOARD-API
 # =========================================================
@@ -1147,6 +1253,14 @@ def guild_roles(guild_id: str):
     if not guild:
         return []
     return [{"id": str(r.id), "name": r.name} for r in guild.roles if r.name != "@everyone"]
+
+
+@app.get("/api/guild-categories")
+def guild_categories(guild_id: str):
+    guild = bot.get_guild(int(guild_id)) if guild_id.isdigit() else None
+    if not guild:
+        return []
+    return [{"id": str(c.id), "name": c.name} for c in guild.categories]
 
 
 # ---------- Übersicht ----------
@@ -1381,6 +1495,49 @@ def logs(guild_id: str, type: str | None = None, db: Session = Depends(get_db)):
     if type and type != "alle":
         q = q.filter(LogEntry.type == type)
     return [{"id": l.id, "type": l.type, "text": l.text, "time": l.created_at.isoformat()} for l in q.limit(200).all()]
+
+
+# ---------- Tickets ----------
+@app.get("/api/tickets")
+def get_tickets(guild_id: str, db: Session = Depends(get_db)):
+    tickets = db.query(Ticket).filter(Ticket.guild_id == guild_id).order_by(Ticket.created_at.desc()).all()
+    return [
+        {
+            "id": t.id, "user_id": t.user_id, "username": t.username, "subject": t.subject,
+            "status": t.status, "channel_id": t.channel_id,
+            "created_at": t.created_at.isoformat() if t.created_at else None,
+            "closed_at": t.closed_at.isoformat() if t.closed_at else None,
+            "closed_by": t.closed_by,
+        }
+        for t in tickets
+    ]
+
+
+@app.post("/api/tickets/{ticket_id}/close")
+async def close_ticket_dashboard(ticket_id: int, guild_id: str, db: Session = Depends(get_db), user=Depends(require_guild_access)):
+    ticket = db.query(Ticket).filter(Ticket.id == ticket_id, Ticket.guild_id == guild_id).first()
+    if not ticket:
+        raise HTTPException(404, "Ticket nicht gefunden.")
+    if ticket.status == "geschlossen":
+        return {"ok": True, "already_closed": True}
+
+    closed_by = user.get("username", "Dashboard")
+    ticket.status = "geschlossen"
+    ticket.closed_at = datetime.now(timezone.utc)
+    ticket.closed_by = closed_by
+    log(db, guild_id, "system", f"Ticket #{ticket.id} ({ticket.username}) wurde von {closed_by} über das Dashboard geschlossen")
+    db.commit()
+
+    guild = bot.get_guild(int(guild_id))
+    channel = guild.get_channel(int(ticket.channel_id)) if guild and ticket.channel_id else None
+    if channel:
+        try:
+            await channel.send(f"🔒 Ticket wurde von **{closed_by}** über das Dashboard geschlossen. Der Kanal wird in 5 Sekunden archiviert.")
+            await asyncio.sleep(5)
+            await channel.delete(reason=f"Ticket geschlossen von {closed_by} (Dashboard)")
+        except Exception as e:
+            print(f"Ticket-Kanal konnte nicht gelöscht werden: {e}")
+    return {"ok": True}
 
 
 # ---------- Statistiken ----------
