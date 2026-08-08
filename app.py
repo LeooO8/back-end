@@ -15,6 +15,7 @@ import os
 import time
 import asyncio
 import random
+import string
 from datetime import datetime, timedelta, timezone
 from typing import Literal
 import httpx
@@ -1056,15 +1057,32 @@ async def duty_cmd(
 
 
 # ---------- Ticket-System ----------
+def generate_case_id() -> str:
+    return "S-" + "".join(random.choices(string.ascii_uppercase + string.digits, k=8))
+
+
 class TicketCloseView(discord.ui.View):
     """Wird in den Ticket-Kanal gepostet - der Button schließt das Ticket."""
     def __init__(self, ticket_id: int):
         super().__init__(timeout=None)
         self.ticket_id = ticket_id
 
-    @discord.ui.button(label="Ticket schließen", style=discord.ButtonStyle.danger, custom_id="close_ticket")
+    @discord.ui.button(label="Ticket schließen", style=discord.ButtonStyle.danger, custom_id="close_ticket", emoji="🔒")
     async def close(self, interaction: discord.Interaction, button: discord.ui.Button):
         await close_ticket(interaction, self.ticket_id, closed_by=interaction.user.display_name)
+
+
+def ticket_info_block(ticket: Ticket) -> str:
+    """Baut die Bullet-Liste mit CaseID/Erstellt am/Nutzer im Stil von gängigen Ticket-Bots."""
+    created = ticket.created_at.strftime("%d. %B %Y um %H:%M") if ticket.created_at else "—"
+    lines = [
+        f"📋 **CaseID:** `#{ticket.case_id or ticket.id}`",
+        f"🕐 **Erstellt am:** {created}",
+        f"👤 **Nutzer:** <@{ticket.user_id}>",
+    ]
+    if ticket.category:
+        lines.insert(1, f"🏷️ **Kategorie:** {ticket.category}")
+    return "\n".join(lines)
 
 
 async def close_ticket(interaction: discord.Interaction, ticket_id: int, closed_by: str):
@@ -1076,10 +1094,16 @@ async def close_ticket(interaction: discord.Interaction, ticket_id: int, closed_
         ticket.status = "geschlossen"
         ticket.closed_at = datetime.now(timezone.utc)
         ticket.closed_by = closed_by
-        log(db, ticket.guild_id, "system", f"Ticket #{ticket.id} ({ticket.username}) wurde von {closed_by} geschlossen")
+        log(db, ticket.guild_id, "system", f"Ticket #{ticket.case_id or ticket.id} ({ticket.username}) wurde von {closed_by} geschlossen")
         db.commit()
 
-        await interaction.response.send_message(f"🔒 Ticket geschlossen von {closed_by}. Der Kanal wird in 5 Sekunden archiviert.")
+        embed = discord.Embed(
+            title="❌ Support-Fall abgeschlossen",
+            description=f"**{closed_by}** hat dieses Ticket geschlossen.\n\n{ticket_info_block(ticket)}",
+            color=COLOR_DANGER, timestamp=datetime.now(timezone.utc),
+        )
+        embed.set_footer(text="Der Kanal wird in 5 Sekunden archiviert")
+        await interaction.response.send_message(embed=embed)
         channel = interaction.guild.get_channel(int(ticket.channel_id)) if ticket.channel_id else None
         if channel:
             await asyncio.sleep(5)
@@ -1091,16 +1115,14 @@ async def close_ticket(interaction: discord.Interaction, ticket_id: int, closed_
         db.close()
 
 
-@bot.tree.command(name="ticket", description="Öffnet ein neues Support-Ticket")
-@app_commands.describe(grund="Worum geht es? (kurz)")
-async def ticket_cmd(interaction: discord.Interaction, grund: str = "Kein Grund angegeben"):
+async def create_ticket_channel(interaction: discord.Interaction, grund: str, kategorie: str = None):
+    """Zentrale Ticket-Erstellung - wird sowohl von /ticket als auch vom Panel-Dropdown genutzt."""
     db = SessionLocal()
     try:
         guild_id = str(interaction.guild_id)
         if not is_module_enabled(db, guild_id, "tickets"):
             return await module_disabled_reply(interaction, "tickets")
 
-        # Nur ein offenes Ticket pro Nutzer gleichzeitig
         existing = db.query(Ticket).filter(
             Ticket.guild_id == guild_id, Ticket.user_id == str(interaction.user.id), Ticket.status == "offen"
         ).first()
@@ -1115,41 +1137,87 @@ async def ticket_cmd(interaction: discord.Interaction, grund: str = "Kein Grund 
             interaction.guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True),
         }
         support_role_id = get_setting_value(db, guild_id, "ticket_support_rolle")
+        support_role = None
         if support_role_id:
-            role = interaction.guild.get_role(int(support_role_id))
-            if role:
-                overwrites[role] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
+            support_role = interaction.guild.get_role(int(support_role_id))
+            if support_role:
+                overwrites[support_role] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
 
-        category = None
+        parent_category = None
         category_id = get_setting_value(db, guild_id, "ticket_kategorie")
         if category_id:
-            category = interaction.guild.get_channel(int(category_id))
+            parent_category = interaction.guild.get_channel(int(category_id))
 
+        case_id = generate_case_id()
         channel_name = f"ticket-{interaction.user.name}".lower().replace(" ", "-")[:90]
         channel = await interaction.guild.create_text_channel(
-            channel_name, category=category, overwrites=overwrites, reason=f"Ticket von {interaction.user.display_name}"
+            channel_name, category=parent_category, overwrites=overwrites, reason=f"Ticket von {interaction.user.display_name}"
         )
 
         ticket = Ticket(
             guild_id=guild_id, user_id=str(interaction.user.id), username=interaction.user.display_name,
-            subject=grund, status="offen", channel_id=str(channel.id),
+            subject=grund, category=kategorie, case_id=case_id, status="offen", channel_id=str(channel.id),
         )
         db.add(ticket)
-        log(db, guild_id, "system", f"{interaction.user.display_name} hat ein Ticket eröffnet: {grund}")
+        log(db, guild_id, "system", f"{interaction.user.display_name} hat ein Ticket eröffnet ({case_id}): {grund}")
         db.commit()
 
         embed = discord.Embed(
             title="🎫 Neues Support-Ticket",
-            description=f"Hey {interaction.user.mention}, danke für deine Anfrage! Ein Team-Mitglied meldet sich in Kürze.",
+            description=f"Hey {interaction.user.mention}, danke für deine Anfrage! Ein Team-Mitglied meldet sich in Kürze.\n\n{ticket_info_block(ticket)}",
             color=COLOR_INFO, timestamp=datetime.now(timezone.utc),
         )
-        embed.add_field(name="📝 Grund", value=grund, inline=False)
+        if grund and grund != "Kein Grund angegeben":
+            embed.add_field(name="📝 Anliegen", value=grund, inline=False)
         embed.set_thumbnail(url=interaction.user.display_avatar.url)
-        embed.set_footer(text=f"Ticket #{ticket.id}")
-        await channel.send(content=interaction.user.mention, embed=embed, view=TicketCloseView(ticket.id))
+        embed.set_footer(text=interaction.guild.name, icon_url=interaction.guild.icon.url if interaction.guild.icon else None)
+        ping = f"{interaction.user.mention} {support_role.mention if support_role else ''}".strip()
+        await channel.send(content=ping, embed=embed, view=TicketCloseView(ticket.id))
         await interaction.followup.send(f"✅ Dein Ticket wurde erstellt: {channel.mention}", ephemeral=True)
     finally:
         db.close()
+
+
+class TicketCategorySelect(discord.ui.Select):
+    def __init__(self, categories: list[str]):
+        options = [discord.SelectOption(label=c, emoji="🎫") for c in categories[:25]]
+        super().__init__(placeholder="Wähle eine Kategorie…", options=options, custom_id="ticket_panel_select")
+
+    async def callback(self, interaction: discord.Interaction):
+        await create_ticket_channel(interaction, grund=f"Kategorie: {self.values[0]}", kategorie=self.values[0])
+
+
+class TicketPanelView(discord.ui.View):
+    def __init__(self, categories: list[str]):
+        super().__init__(timeout=None)
+        self.add_item(TicketCategorySelect(categories))
+
+
+@bot.tree.command(name="ticket_panel", description="[Admin] Postet ein Ticket-Panel mit Kategorie-Auswahl in diesen Kanal")
+@app_commands.checks.has_permissions(administrator=True)
+async def ticket_panel_cmd(interaction: discord.Interaction):
+    db = SessionLocal()
+    try:
+        guild_id = str(interaction.guild_id)
+        titel = get_setting_value(db, guild_id, "ticket_panel_titel", default="Support-Tickets")
+        text = get_setting_value(db, guild_id, "ticket_panel_text", default="Hast du eine Frage oder ein Problem? Erstell dir hier ein privates Ticket — unser Team hilft dir schnellstmöglich weiter.")
+        bild_url = get_setting_value(db, guild_id, "ticket_panel_bild_url")
+        kategorien_raw = get_setting_value(db, guild_id, "ticket_kategorien", default="Support")
+        kategorien = [k.strip() for k in kategorien_raw.split(",") if k.strip()]
+    finally:
+        db.close()
+
+    embed = discord.Embed(title=f"🎫 {titel}", description=text, color=BRAND_COLOR)
+    if bild_url:
+        embed.set_image(url=bild_url)
+    embed.set_footer(text=interaction.guild.name, icon_url=interaction.guild.icon.url if interaction.guild.icon else None)
+    await interaction.response.send_message(embed=embed, view=TicketPanelView(kategorien))
+
+
+@bot.tree.command(name="ticket", description="Öffnet ein neues Support-Ticket")
+@app_commands.describe(grund="Worum geht es? (kurz)")
+async def ticket_cmd(interaction: discord.Interaction, grund: str = "Kein Grund angegeben"):
+    await create_ticket_channel(interaction, grund)
 
 
 @bot.tree.command(name="ticket_schliessen", description="Schließt das aktuelle Ticket (nur im Ticket-Kanal nutzbar)")
@@ -1728,7 +1796,8 @@ def get_tickets(guild_id: str, db: Session = Depends(get_db)):
     tickets = db.query(Ticket).filter(Ticket.guild_id == guild_id).order_by(Ticket.created_at.desc()).all()
     return [
         {
-            "id": t.id, "user_id": t.user_id, "username": t.username, "subject": t.subject,
+            "id": t.id, "case_id": t.case_id, "user_id": t.user_id, "username": t.username,
+            "subject": t.subject, "category": t.category,
             "status": t.status, "channel_id": t.channel_id,
             "created_at": t.created_at.isoformat() if t.created_at else None,
             "closed_at": t.closed_at.isoformat() if t.closed_at else None,
