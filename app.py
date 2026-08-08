@@ -59,6 +59,30 @@ def get_setting_value(db, guild_id, key, default=None):
     return s.value if s and s.value not in (None, "") else default
 
 
+MODULE_NAMES = {
+    "bank": "Bank-System",
+    "shop": "Shop-System",
+    "dienst": "Dienst-System",
+    "afk": "AFK-System",
+    "giveaways": "Giveaways",
+}
+
+
+def is_module_enabled(db, guild_id, module_key: str) -> bool:
+    """Prüft, ob ein Modul für einen Server aktiviert ist. Module sind
+    standardmäßig aktiv - erst eine explizite Einstellung 'modul_<key>' auf
+    'nein'/'false'/'0'/'aus' schaltet sie ab (Setting-Key z.B. 'modul_bank')."""
+    value = get_setting_value(db, str(guild_id), f"modul_{module_key}")
+    if value is None:
+        return True
+    return value.strip().lower() not in ("nein", "no", "false", "0", "aus")
+
+
+async def module_disabled_reply(interaction: discord.Interaction, module_key: str):
+    name = MODULE_NAMES.get(module_key, module_key)
+    await interaction.response.send_message(f"🚫 **{name}** ist auf diesem Server deaktiviert.", ephemeral=True)
+
+
 # =========================================================
 # TEIL 1: DER DISCORD-BOT
 # =========================================================
@@ -416,6 +440,12 @@ async def on_raw_reaction_remove(payload: discord.RawReactionActionEvent):
 async def giveaway_create_cmd(interaction: discord.Interaction, preis: str, dauer_minuten: int):
     if dauer_minuten <= 0:
         return await interaction.response.send_message("Die Dauer muss positiv sein.", ephemeral=True)
+    db_check = SessionLocal()
+    try:
+        if not is_module_enabled(db_check, interaction.guild_id, "giveaways"):
+            return await module_disabled_reply(interaction, "giveaways")
+    finally:
+        db_check.close()
     ends_at = datetime.now(timezone.utc) + timedelta(minutes=dauer_minuten)
     embed = discord.Embed(
         title="🎉 Giveaway!",
@@ -443,6 +473,8 @@ async def giveaway_create_cmd(interaction: discord.Interaction, preis: str, daue
 async def giveaway_end_cmd(interaction: discord.Interaction, giveaway_id: int):
     db = SessionLocal()
     try:
+        if not is_module_enabled(db, interaction.guild_id, "giveaways"):
+            return await module_disabled_reply(interaction, "giveaways")
         g = db.query(Giveaway).filter(Giveaway.id == giveaway_id, Giveaway.guild_id == str(interaction.guild_id)).first()
         if not g or g.status != "aktiv":
             return await interaction.response.send_message("Giveaway nicht gefunden oder schon beendet.", ephemeral=True)
@@ -458,6 +490,8 @@ async def giveaway_end_cmd(interaction: discord.Interaction, giveaway_id: int):
 async def giveaway_reroll_cmd(interaction: discord.Interaction, giveaway_id: int):
     db = SessionLocal()
     try:
+        if not is_module_enabled(db, interaction.guild_id, "giveaways"):
+            return await module_disabled_reply(interaction, "giveaways")
         g = db.query(Giveaway).filter(Giveaway.id == giveaway_id, Giveaway.guild_id == str(interaction.guild_id)).first()
         if not g:
             return await interaction.response.send_message("Giveaway nicht gefunden.", ephemeral=True)
@@ -519,6 +553,8 @@ async def on_message(message: discord.Message):
 async def afk_cmd(interaction: discord.Interaction, grund: str = "Kein Grund angegeben"):
     db = SessionLocal()
     try:
+        if not is_module_enabled(db, interaction.guild_id, "afk"):
+            return await module_disabled_reply(interaction, "afk")
         user = get_or_create_user(db, interaction.user)
         user.afk_reason = grund
         user.afk_since = datetime.now(timezone.utc)
@@ -533,6 +569,8 @@ async def afk_cmd(interaction: discord.Interaction, grund: str = "Kein Grund ang
 async def balance_cmd(interaction: discord.Interaction):
     db = SessionLocal()
     try:
+        if not is_module_enabled(db, interaction.guild_id, "bank"):
+            return await module_disabled_reply(interaction, "bank")
         user = get_or_create_user(db, interaction.user)
         await interaction.response.send_message(
             f"💰 Kontostand: **{user.balance:,} ₡**\n💵 Bargeld: **{user.cash:,} ₡**".replace(",", ".")
@@ -548,6 +586,8 @@ async def deposit_cmd(interaction: discord.Interaction, betrag: int):
         return await interaction.response.send_message("Der Betrag muss positiv sein.", ephemeral=True)
     db = SessionLocal()
     try:
+        if not is_module_enabled(db, interaction.guild_id, "bank"):
+            return await module_disabled_reply(interaction, "bank")
         user = get_or_create_user(db, interaction.user)
         if user.cash < betrag:
             return await interaction.response.send_message("❌ Nicht genug Bargeld.", ephemeral=True)
@@ -568,6 +608,8 @@ async def withdraw_cmd(interaction: discord.Interaction, betrag: int):
         return await interaction.response.send_message("Der Betrag muss positiv sein.", ephemeral=True)
     db = SessionLocal()
     try:
+        if not is_module_enabled(db, interaction.guild_id, "bank"):
+            return await module_disabled_reply(interaction, "bank")
         user = get_or_create_user(db, interaction.user)
         if user.balance < betrag:
             return await interaction.response.send_message("❌ Nicht genug Bankguthaben.", ephemeral=True)
@@ -588,6 +630,8 @@ async def transfer_cmd(interaction: discord.Interaction, empfaenger: discord.Mem
         return await interaction.response.send_message("Der Betrag muss positiv sein.", ephemeral=True)
     db = SessionLocal()
     try:
+        if not is_module_enabled(db, interaction.guild_id, "bank"):
+            return await module_disabled_reply(interaction, "bank")
         max_transfer = get_setting_value(db, interaction.guild_id, "max_ueberweisung")
         if max_transfer and betrag > int(max_transfer):
             return await interaction.response.send_message(f"❌ Maximal erlaubter Betrag: {int(max_transfer):,} ₡".replace(",", "."), ephemeral=True)
@@ -609,6 +653,8 @@ async def transfer_cmd(interaction: discord.Interaction, empfaenger: discord.Mem
 async def shop_cmd(interaction: discord.Interaction):
     db = SessionLocal()
     try:
+        if not is_module_enabled(db, interaction.guild_id, "shop"):
+            return await module_disabled_reply(interaction, "shop")
         items = db.query(ShopItem).filter(ShopItem.guild_id == str(interaction.guild_id)).all()
         if not items:
             return await interaction.response.send_message("Der Shop ist noch leer.")
@@ -629,6 +675,8 @@ async def shop_cmd(interaction: discord.Interaction):
 async def complete_purchase(interaction: discord.Interaction, item_id: int, edit: bool = False):
     db = SessionLocal()
     try:
+        if not is_module_enabled(db, interaction.guild_id, "shop"):
+            return await module_disabled_reply(interaction, "shop")
         item = db.query(ShopItem).get(item_id)
         if not item:
             text = "Artikel nicht mehr verfügbar."
@@ -894,6 +942,8 @@ async def duty_cmd(
     db = SessionLocal()
     try:
         guild_id = str(interaction.guild_id)
+        if not is_module_enabled(db, guild_id, "dienst"):
+            return await module_disabled_reply(interaction, "dienst")
         user = get_or_create_user(db, interaction.user)
         try:
             f, status, paid = toggle_duty_for_user(db, guild_id, user, fraktion)
@@ -1537,3 +1587,31 @@ def update_settings(guild_id: str, payload: dict, db: Session = Depends(get_db),
     log(db, guild_id, "system", f"Einstellungen geändert: {', '.join(payload.keys())}")
     db.commit()
     return {"ok": True}
+
+
+# ---------- Module ----------
+@app.get("/api/modules")
+def get_modules(guild_id: str, db: Session = Depends(get_db)):
+    """Gibt für jedes bekannte Modul zurück, ob es auf diesem Server aktiv ist."""
+    return {
+        key: {"name": name, "enabled": is_module_enabled(db, guild_id, key)}
+        for key, name in MODULE_NAMES.items()
+    }
+
+
+@app.post("/api/modules/{module_key}")
+def update_module(module_key: str, payload: dict, guild_id: str, db: Session = Depends(get_db), user=Depends(require_guild_access)):
+    """Schaltet ein einzelnes Modul für den Server an oder aus. Erwartet {"enabled": true/false}."""
+    if module_key not in MODULE_NAMES:
+        raise HTTPException(404, "Unbekanntes Modul.")
+    enabled = bool(payload.get("enabled", True))
+    full_key = gkey(guild_id, f"modul_{module_key}")
+    setting = db.query(Setting).get(full_key)
+    value = "ja" if enabled else "nein"
+    if setting:
+        setting.value = value
+    else:
+        db.add(Setting(key=full_key, value=value))
+    log(db, guild_id, "system", f"{MODULE_NAMES[module_key]} wurde {'aktiviert' if enabled else 'deaktiviert'}")
+    db.commit()
+    return {"ok": True, "module": module_key, "enabled": enabled}
