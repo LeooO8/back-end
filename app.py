@@ -30,7 +30,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import func
 
 from database import get_db, init_db, SessionLocal
-from models import User, Transaction, ShopItem, DutyFraction, Giveaway, LogEntry, Setting, LoginSession, Ticket
+from models import User, Transaction, ShopItem, DutyFraction, Giveaway, LogEntry, Setting, LoginSession, Ticket, Todo
 
 # ---------- Konfiguration (kommt aus Umgebungsvariablen, siehe README) ----------
 DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
@@ -1616,6 +1616,56 @@ def team_members(guild_id: str, db: Session = Depends(get_db)):
         }
         for u in members
     ]
+
+
+# ---------- To-Do-Liste ----------
+@app.get("/api/todos")
+def get_todos(guild_id: str, db: Session = Depends(get_db)):
+    todos = db.query(Todo).filter(Todo.guild_id == guild_id).order_by(Todo.created_at.desc()).all()
+    return [
+        {
+            "id": t.id, "title": t.title, "status": t.status, "assigned_to": t.assigned_to,
+            "created_by": t.created_by, "created_at": t.created_at.isoformat() if t.created_at else None,
+            "done_at": t.done_at.isoformat() if t.done_at else None,
+        }
+        for t in todos
+    ]
+
+
+@app.post("/api/todos")
+def create_todo(guild_id: str, title: str, assigned_to: str = "", db: Session = Depends(get_db), user=Depends(require_guild_access)):
+    if not title.strip():
+        raise HTTPException(400, "Titel darf nicht leer sein.")
+    todo = Todo(guild_id=guild_id, title=title.strip(), assigned_to=assigned_to or None, created_by=user.get("username", "Dashboard"))
+    db.add(todo)
+    log(db, guild_id, "system", f"Aufgabe erstellt: {title.strip()}")
+    db.commit()
+    return {"ok": True, "id": todo.id}
+
+
+@app.post("/api/todos/{todo_id}/toggle")
+def toggle_todo(todo_id: int, guild_id: str, db: Session = Depends(get_db), user=Depends(require_guild_access)):
+    todo = db.query(Todo).filter(Todo.id == todo_id, Todo.guild_id == guild_id).first()
+    if not todo:
+        raise HTTPException(404, "Aufgabe nicht gefunden.")
+    if todo.status == "erledigt":
+        todo.status = "offen"
+        todo.done_at = None
+    else:
+        todo.status = "erledigt"
+        todo.done_at = datetime.now(timezone.utc)
+    db.commit()
+    return {"ok": True, "status": todo.status}
+
+
+@app.delete("/api/todos/{todo_id}")
+def delete_todo(todo_id: int, guild_id: str, db: Session = Depends(get_db), user=Depends(require_guild_access)):
+    todo = db.query(Todo).filter(Todo.id == todo_id, Todo.guild_id == guild_id).first()
+    if not todo:
+        raise HTTPException(404, "Aufgabe nicht gefunden.")
+    db.delete(todo)
+    db.commit()
+    return {"ok": True}
 
 
 @app.post("/api/users/{user_id}/balance")
