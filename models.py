@@ -119,3 +119,15 @@ class Ticket(Base):
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     closed_at = Column(DateTime, nullable=True)
     closed_by = Column(String, nullable=True)      # Username, der das Ticket geschlossen hat
+
+
+class Todo(Base):
+    __tablename__ = "todos"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    guild_id = Column(String, nullable=True)
+    title = Column(String, nullable=False)
+    status = Column(String, default="offen")       # "offen" oder "erledigt"
+    assigned_to = Column(String, nullable=True)     # Username, optional
+    created_by = Column(String, nullable=False)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    done_at = Column(DateTime, nullable=True)
