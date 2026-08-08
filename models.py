@@ -114,6 +114,8 @@ class Ticket(Base):
     user_id = Column(String, nullable=False)      # Discord-ID des Erstellers
     username = Column(String, nullable=False)
     subject = Column(String, nullable=True)        # Kurzer Grund/Betreff
+    category = Column(String, nullable=True)        # Gewählte Kategorie aus dem Panel (falls verwendet)
+    case_id = Column(String, nullable=True)         # Kurzer Fall-Code fürs Anzeigen, z.B. "S-A1B2C3D4"
     status = Column(String, default="offen")       # "offen" oder "geschlossen"
     channel_id = Column(String, nullable=True)     # Discord-Kanal-ID des Tickets
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
