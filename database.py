@@ -44,6 +44,8 @@ def init_db():
             "ALTER TABLE users ADD COLUMN cash BIGINT DEFAULT 0",
             "ALTER TABLE users ADD COLUMN duty_started_at DATETIME",
             "ALTER TABLE shop_items ADD COLUMN role_id VARCHAR",
+            "ALTER TABLE tickets ADD COLUMN category VARCHAR",
+            "ALTER TABLE tickets ADD COLUMN case_id VARCHAR",
         ]:
             try:
                 conn.execute(text(stmt))
