@@ -13,7 +13,6 @@ Dashboard fragt dafür bei jeder Anfrage eine guild_id (Server-ID) mit.
 """
 import os
 import time
-import threading
 import asyncio
 import random
 from datetime import datetime, timedelta, timezone
@@ -1326,25 +1325,6 @@ async def sync_commands(guild_id: str, user=Depends(require_guild_access)):
     finally:
         db.close()
     return {"ok": True, "synced_count": len(synced)}
-
-
-@app.post("/api/bot/restart")
-def restart_bot(guild_id: str, user=Depends(require_guild_access)):
-    """Beendet den Prozess bewusst - die Hosting-Plattform (z.B. Railway) startet
-    den Container automatisch neu. Betrifft ALLE Server, nicht nur diesen."""
-    db = SessionLocal()
-    try:
-        log(db, guild_id, "system", f"Bot-Neustart ausgelöst von {user.get('username', 'Dashboard')}")
-        db.commit()
-    finally:
-        db.close()
-
-    def _delayed_exit():
-        time.sleep(1.5)  # kurze Verzögerung, damit die Antwort noch beim Dashboard ankommt
-        os._exit(0)
-
-    threading.Thread(target=_delayed_exit, daemon=True).start()
-    return {"ok": True, "message": "Neustart wird ausgeführt — der Bot ist für ein paar Sekunden offline."}
 
 
 # ---------- Bank ----------
