@@ -13,6 +13,7 @@ Dashboard fragt dafür bei jeder Anfrage eine guild_id (Server-ID) mit.
 """
 import os
 import time
+import threading
 import asyncio
 import random
 from datetime import datetime, timedelta, timezone
@@ -92,6 +93,29 @@ intents.members = True
 intents.message_content = True
 bot = commands.Bot(command_prefix=BOT_PREFIX, intents=intents)
 BOT_START_TIME = datetime.now(timezone.utc)
+
+
+async def maintenance_check(interaction: discord.Interaction) -> bool:
+    """Globaler Check vor JEDEM Slash-Befehl: blockt alle Befehle im
+    Wartungsmodus außer für Server-Administratoren."""
+    if not interaction.guild_id:
+        return True
+    db = SessionLocal()
+    try:
+        maint = get_setting_value(db, str(interaction.guild_id), "wartungsmodus")
+    finally:
+        db.close()
+    if maint and maint.strip().lower() in ("ja", "yes", "true", "1", "an"):
+        if interaction.user.guild_permissions.administrator:
+            return True
+        await interaction.response.send_message(
+            "🛠️ Der Bot befindet sich gerade im Wartungsmodus. Bitte versuch es in Kürze erneut.", ephemeral=True
+        )
+        return False
+    return True
+
+
+bot.tree.interaction_check = maintenance_check
 
 
 def get_starting_balance(db, guild_id) -> int:
@@ -1279,6 +1303,48 @@ def overview(guild_id: str, db: Session = Depends(get_db)):
         "uptime_seconds": uptime_seconds,
         "recent_logs": [{"id": l.id, "type": l.type, "text": l.text, "time": l.created_at.isoformat()} for l in recent],
     }
+
+
+# ---------- Bot-Steuerung ----------
+@app.post("/api/bot/sync")
+async def sync_commands(guild_id: str, user=Depends(require_guild_access)):
+    """Synct die Slash-Commands neu für diesen Server (z.B. nachdem neue Befehle
+    hinzugefügt wurden und sie in Discord noch nicht auftauchen)."""
+    if not bot.is_ready():
+        raise HTTPException(503, "Der Bot ist gerade nicht verbunden.")
+    guild = bot.get_guild(int(guild_id))
+    if not guild:
+        raise HTTPException(404, "Server nicht gefunden — ist der Bot dort Mitglied?")
+    try:
+        synced = await bot.tree.sync(guild=guild)
+    except Exception as e:
+        raise HTTPException(500, f"Sync fehlgeschlagen: {e}")
+    db = SessionLocal()
+    try:
+        log(db, guild_id, "system", f"Befehle neu synchronisiert von {user.get('username', 'Dashboard')} ({len(synced)} Befehle)")
+        db.commit()
+    finally:
+        db.close()
+    return {"ok": True, "synced_count": len(synced)}
+
+
+@app.post("/api/bot/restart")
+def restart_bot(guild_id: str, user=Depends(require_guild_access)):
+    """Beendet den Prozess bewusst - die Hosting-Plattform (z.B. Railway) startet
+    den Container automatisch neu. Betrifft ALLE Server, nicht nur diesen."""
+    db = SessionLocal()
+    try:
+        log(db, guild_id, "system", f"Bot-Neustart ausgelöst von {user.get('username', 'Dashboard')}")
+        db.commit()
+    finally:
+        db.close()
+
+    def _delayed_exit():
+        time.sleep(1.5)  # kurze Verzögerung, damit die Antwort noch beim Dashboard ankommt
+        os._exit(0)
+
+    threading.Thread(target=_delayed_exit, daemon=True).start()
+    return {"ok": True, "message": "Neustart wird ausgeführt — der Bot ist für ein paar Sekunden offline."}
 
 
 # ---------- Bank ----------
