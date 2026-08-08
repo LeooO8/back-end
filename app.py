@@ -1895,6 +1895,7 @@ def update_settings(guild_id: str, payload: dict, db: Session = Depends(get_db),
             setting.value = str(value)
         else:
             db.add(Setting(key=full_key, value=str(value)))
+    db.commit()
     log(db, guild_id, "system", f"Einstellungen geändert: {', '.join(payload.keys())}")
     db.commit()
     return {"ok": True}
