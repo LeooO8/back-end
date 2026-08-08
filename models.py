@@ -105,3 +105,17 @@ class LoginSession(Base):
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     token = Column(String, nullable=True, unique=True)  # eindeutige Sitzungs-ID (steckt auch im JWT)
     revoked = Column(String, default="")  # "yes", falls die Sitzung beendet wurde
+
+
+class Ticket(Base):
+    __tablename__ = "tickets"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    guild_id = Column(String, nullable=True)
+    user_id = Column(String, nullable=False)      # Discord-ID des Erstellers
+    username = Column(String, nullable=False)
+    subject = Column(String, nullable=True)        # Kurzer Grund/Betreff
+    status = Column(String, default="offen")       # "offen" oder "geschlossen"
+    channel_id = Column(String, nullable=True)     # Discord-Kanal-ID des Tickets
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    closed_at = Column(DateTime, nullable=True)
+    closed_by = Column(String, nullable=True)      # Username, der das Ticket geschlossen hat
