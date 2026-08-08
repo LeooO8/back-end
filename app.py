@@ -1290,7 +1290,8 @@ def guild_categories(guild_id: str):
 @app.get("/api/overview")
 def overview(guild_id: str, db: Session = Depends(get_db)):
     total_balance = db.query(func.sum(User.balance)).filter(User.guild_id == guild_id).scalar() or 0
-    member_count = db.query(func.count(User.id)).filter(User.guild_id == guild_id).scalar() or 0
+    guild = bot.get_guild(int(guild_id)) if guild_id.isdigit() else None
+    member_count = guild.member_count if guild else (db.query(func.count(User.id)).filter(User.guild_id == guild_id).scalar() or 0)
     on_duty = db.query(func.sum(DutyFraction.on_duty)).filter(DutyFraction.guild_id == guild_id).scalar() or 0
     recent = db.query(LogEntry).filter(LogEntry.guild_id == guild_id).order_by(LogEntry.created_at.desc()).limit(5).all()
     uptime_seconds = (datetime.now(timezone.utc) - BOT_START_TIME).total_seconds()
@@ -1605,7 +1606,7 @@ def stats(guild_id: str, db: Session = Depends(get_db)):
         weekly_activity.append({"day": weekday_labels[day.weekday()], "count": count})
 
     return {
-        "member_count": db.query(func.count(User.id)).filter(User.guild_id == guild_id).scalar() or 0,
+        "member_count": (bot.get_guild(int(guild_id)).member_count if guild_id.isdigit() and bot.get_guild(int(guild_id)) else (db.query(func.count(User.id)).filter(User.guild_id == guild_id).scalar() or 0)),
         "active_users_7d": active_users,
         "total_balance": db.query(func.sum(User.balance)).filter(User.guild_id == guild_id).scalar() or 0,
         "shop_sales": db.query(func.sum(ShopItem.sold)).filter(ShopItem.guild_id == guild_id).scalar() or 0,
