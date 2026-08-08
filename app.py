@@ -149,7 +149,7 @@ def sync_admin_role(db, guild: "discord.Guild | None", user: User):
             user.role = "Admin"
     elif user.role == "Admin":
         # Admin-Rolle wurde in Discord entzogen -> Dashboard-Rolle zurücksetzen
-        user.role = "Member"
+        user.role = "Mitglied"
 
 
 def get_or_create_user(db, member: discord.Member) -> User:
@@ -1600,6 +1600,22 @@ def update_role(user_id: str, guild_id: str, role: str, db: Session = Depends(ge
     log(db, guild_id, "system", f"Rolle von {target.username} geändert zu {role}")
     db.commit()
     return {"ok": True}
+
+
+TEAM_ROLES = ["Support", "Moderator", "Admin", "Owner"]
+
+
+@app.get("/api/team")
+def team_members(guild_id: str, db: Session = Depends(get_db)):
+    """Alle Nutzer mit einer Team-Rolle (alles außer 'Mitglied')."""
+    members = db.query(User).filter(User.guild_id == guild_id, User.role.in_(TEAM_ROLES)).all()
+    return [
+        {
+            "id": u.id, "name": u.username, "role": u.role,
+            "status": compute_status(u.last_seen), "joined": u.joined_at.isoformat(),
+        }
+        for u in members
+    ]
 
 
 @app.post("/api/users/{user_id}/balance")
