@@ -12,16 +12,19 @@ Daten (Konten, Shop, Dienste, Giveaways, Einstellungen, Logs). Das
 Dashboard fragt dafür bei jeder Anfrage eine guild_id (Server-ID) mit.
 """
 import os
+import io
 import time
 import asyncio
 import random
 import string
+import textwrap
 from datetime import datetime, timedelta, timezone
 from typing import Literal
 import httpx
 import jwt
 import uuid
 import discord
+from PIL import Image, ImageDraw, ImageFont
 from discord import app_commands
 from discord.ext import commands, tasks
 from fastapi import FastAPI, Depends, HTTPException, Response, Request
@@ -1076,6 +1079,97 @@ async def duty_cmd(
         db.close()
 
 
+# ---------- Ticket-Karte (Bild statt Text-Box) ----------
+_TICKET_CARD_BASE_CACHE: dict[str, "Image.Image"] = {}
+
+
+def _load_font(paths: list, size: int) -> "ImageFont.FreeTypeFont":
+    for p in paths:
+        try:
+            return ImageFont.truetype(p, size)
+        except Exception:
+            continue
+    return ImageFont.load_default()
+
+
+_FONT_TITLE_PATHS = ["/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"]
+_FONT_TEXT_PATHS = ["/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"]
+
+
+async def get_ticket_card_base(url: str) -> "Image.Image | None":
+    """Lädt die Grundplatte-Bilddatei (per URL) und cacht sie im Arbeitsspeicher,
+    damit sie nicht bei jedem einzelnen Ticket erneut heruntergeladen wird."""
+    if url in _TICKET_CARD_BASE_CACHE:
+        return _TICKET_CARD_BASE_CACHE[url].copy()
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(url)
+            resp.raise_for_status()
+        img = Image.open(io.BytesIO(resp.content)).convert("RGBA")
+        _TICKET_CARD_BASE_CACHE[url] = img
+        return img.copy()
+    except Exception as e:
+        print(f"Konnte Ticket-Karten-Grundplatte nicht laden: {e}")
+        return None
+
+
+def draw_ticket_card(base: "Image.Image", title: str, intro: str, rows: list[tuple[str, str]]) -> io.BytesIO:
+    """Zeichnet Titel, Einleitungstext und Info-Zeilen (Label, Wert) direkt auf die
+    Grundplatte. Gibt ein fertiges PNG als BytesIO zurück, bereit zum Versenden."""
+    img = base.copy()
+    draw = ImageDraw.Draw(img)
+    w, h = img.size
+
+    font_title = _load_font(_FONT_TITLE_PATHS, max(18, w // 24))
+    font_text = _load_font(_FONT_TEXT_PATHS, max(12, w // 36))
+    font_label = _load_font(_FONT_TITLE_PATHS, max(12, w // 36))
+
+    pad_x = int(w * 0.05)
+    y = int(h * 0.16)
+
+    draw.text((pad_x, y), title, font=font_title, fill=(255, 255, 255, 255))
+    y += font_title.size + 16
+
+    wrap_width = max(30, int((w - 2 * pad_x) / (font_text.size * 0.55)))
+    for line in textwrap.wrap(intro, width=wrap_width):
+        draw.text((pad_x, y), line, font=font_text, fill=(200, 200, 205, 255))
+        y += font_text.size + 8
+
+    y += 12
+    draw.line([(pad_x, y), (w - pad_x, y)], fill=(90, 90, 95, 255), width=1)
+    y += 16
+
+    label_width = int(w * 0.24)
+    for label, value in rows:
+        draw.text((pad_x, y), f"• {label}:", font=font_label, fill=(255, 255, 255, 255))
+        draw.text((pad_x + label_width, y), value, font=font_text, fill=(180, 180, 190, 255))
+        y += font_text.size + 10
+
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    buf.seek(0)
+    return buf
+
+
+async def build_ticket_card_file(db, guild_id: str, title: str, intro: str, rows: list[tuple[str, str]]) -> "discord.File | None":
+    """Baut die fertige Ticket-Karte als discord.File, falls eine Grundplatte
+    hinterlegt ist (Setting 'ticket_karte_grundplatte_url'). Gibt None zurück,
+    wenn keine Grundplatte gesetzt ist oder das Laden/Zeichnen fehlschlägt -
+    der Aufrufer soll dann auf Text (Components V2/Embed) zurückfallen."""
+    url = get_setting_value(db, guild_id, "ticket_karte_grundplatte_url")
+    if not url:
+        return None
+    base = await get_ticket_card_base(url)
+    if base is None:
+        return None
+    try:
+        buf = draw_ticket_card(base, title, intro, rows)
+        return discord.File(buf, filename="ticket.png")
+    except Exception as e:
+        print(f"Konnte Ticket-Karte nicht zeichnen: {e}")
+        return None
+
+
 # ---------- Ticket-System ----------
 def generate_case_id() -> str:
     return "S-" + "".join(random.choices(string.ascii_uppercase + string.digits, k=8))
@@ -1168,7 +1262,19 @@ async def close_ticket(interaction: discord.Interaction, ticket_id: int, closed_
         log(db, ticket.guild_id, "system", f"Ticket #{ticket.case_id or ticket.id} ({ticket.username}) wurde von {closed_by} geschlossen")
         db.commit()
 
-        if COMPONENTS_V2:
+        rows = [("CaseID", f"#{ticket.case_id or ticket.id}")]
+        if ticket.category:
+            rows.append(("Kategorie", ticket.category))
+        rows += [("Nutzer", ticket.username), ("Geschlossen von", closed_by)]
+        card_file = await build_ticket_card_file(
+            db, ticket.guild_id, "Support-Fall abgeschlossen",
+            f"{closed_by} hat dieses Ticket geschlossen. Der Kanal wird in 5 Sekunden archiviert.",
+            rows,
+        )
+
+        if card_file:
+            await interaction.response.send_message(file=card_file)
+        elif COMPONENTS_V2:
             await interaction.response.send_message(view=TicketClosedLayoutV2(ticket, closed_by))
         else:
             embed = discord.Embed(
@@ -1239,7 +1345,21 @@ async def create_ticket_channel(interaction: discord.Interaction, grund: str, ka
         db.commit()
 
         ping = f"{interaction.user.mention} {support_role.mention if support_role else ''}".strip()
-        if COMPONENTS_V2:
+
+        rows = [("CaseID", f"#{ticket.case_id}"), ("Erstellt am", ticket.created_at.strftime("%d. %B %Y um %H:%M"))]
+        if ticket.category:
+            rows.insert(1, ("Kategorie", ticket.category))
+        rows.append(("Nutzer", interaction.user.display_name))
+        card_file = await build_ticket_card_file(
+            db, guild_id, "Neues Support-Ticket",
+            f"Hey {interaction.user.display_name}, danke für deine Anfrage! Ein Team-Mitglied meldet sich in Kürze.",
+            rows,
+        )
+
+        if card_file:
+            close_view = TicketCloseView(ticket.id)
+            await channel.send(content=ping, file=card_file, view=close_view)
+        elif COMPONENTS_V2:
             # Bei Components V2 darf 'content' nicht zusammen mit einer LayoutView gesendet
             # werden - die Erwähnung/Ping steckt stattdessen im ersten Textbaustein.
             view = TicketOpenLayoutV2(ticket, ping, grund)
