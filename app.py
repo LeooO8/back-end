@@ -77,11 +77,16 @@ LOG_TYPE_STYLE = {
 }
 
 
-def branded_embed(**kwargs) -> discord.Embed:
-    """Baut ein Embed mit einheitlichem Zeitstempel + Footer-Branding."""
-    kwargs.setdefault("color", BRAND_COLOR)
-    embed = discord.Embed(timestamp=datetime.now(timezone.utc), **kwargs)
-    embed.set_footer(text="Server Control Panel")
+def apply_brand(embed: discord.Embed, db, guild: "discord.Guild | None") -> discord.Embed:
+    """Setzt einheitlich die Autor-Zeile (Server-Name + Icon oben im Embed) und,
+    falls unter Einstellungen ein 'embed_banner_url' hinterlegt ist, ein Banner-
+    Bild ganz unten. Bei Embeds mit eigenem Banner (Willkommen, Ticket-Panel)
+    danach einfach embed.set_image() erneut aufrufen - das überschreibt es gezielt."""
+    if guild:
+        embed.set_author(name=guild.name, icon_url=guild.icon.url if guild.icon else None)
+        banner_url = get_setting_value(db, str(guild.id), "embed_banner_url")
+        if banner_url:
+            embed.set_image(url=banner_url)
     return embed
 
 
@@ -222,6 +227,7 @@ def _post_log_to_channel(guild_id, type_: str, text: str):
         db2 = SessionLocal()
         try:
             channel_id = get_setting_value(db2, guild_id, "log_kanal")
+            banner_url = get_setting_value(db2, guild_id, "embed_banner_url")
         finally:
             db2.close()
         if not channel_id:
@@ -233,6 +239,8 @@ def _post_log_to_channel(guild_id, type_: str, text: str):
                 icon, color = LOG_TYPE_STYLE.get(type_, ("📋", COLOR_LOG))
                 embed = discord.Embed(description=text, color=color, timestamp=datetime.now(timezone.utc))
                 embed.set_author(name=f"{icon} {type_.capitalize()}")
+                if banner_url:
+                    embed.set_image(url=banner_url)
                 await channel.send(embed=embed)
             except Exception as e:
                 print(f"Log-Kanal-Post fehlgeschlagen: {e}")
@@ -306,12 +314,12 @@ async def on_member_join(member: discord.Member):
                     color=BRAND_COLOR, timestamp=datetime.now(timezone.utc),
                 )
                 embed.set_thumbnail(url=member.display_avatar.url)
-                banner_url = get_setting_value(db, guild_id, "welcome_banner_url")
-                if banner_url:
-                    embed.set_image(url=banner_url)
                 embed.add_field(name="💰 Startguthaben", value=f"{user.balance:,} ₡".replace(",", "."), inline=True)
                 embed.add_field(name="👥 Mitgliederzahl", value=f"#{member.guild.member_count}", inline=True)
-                embed.set_footer(text=member.guild.name, icon_url=member.guild.icon.url if member.guild.icon else None)
+                apply_brand(embed, db, member.guild)
+                banner_url = get_setting_value(db, guild_id, "welcome_banner_url")
+                if banner_url:
+                    embed.set_image(url=banner_url)  # eigenes Willkommens-Banner hat Vorrang vor dem generischen
                 await channel.send(embed=embed)
             except Exception as e:
                 print(f"Konnte Willkommensnachricht nicht senden: {e}")
@@ -375,6 +383,7 @@ async def draw_giveaway_winner(db, giveaway: Giveaway):
                     description=f"### 🎁 {giveaway.prize}\n\nLeider hat niemand teilgenommen.",
                     color=COLOR_LOG, timestamp=datetime.now(timezone.utc),
                 )
+            apply_brand(embed, db, channel.guild)
             await channel.send(embed=embed)
         except Exception as e:
             print(f"Konnte Giveaway-Ergebnis nicht senden: {e}")
@@ -541,6 +550,11 @@ async def giveaway_create_cmd(interaction: discord.Interaction, preis: str, daue
     embed.add_field(name="⏰ Endet", value=f"<t:{int(ends_at.timestamp())}:R>", inline=True)
     embed.add_field(name="🎁 Gestartet von", value=interaction.user.mention, inline=True)
     embed.set_footer(text="Viel Glück!")
+    db_brand = SessionLocal()
+    try:
+        apply_brand(embed, db_brand, interaction.guild)
+    finally:
+        db_brand.close()
     await interaction.response.send_message(embed=embed)
     message = await interaction.original_response()
     await message.add_reaction(GIVEAWAY_EMOJI)
@@ -755,8 +769,7 @@ async def shop_cmd(interaction: discord.Interaction):
         for i in items:
             preis = f"{i.price:,} ₡".replace(",", ".")
             embed.add_field(name=f"`{i.id:04d}` · {i.name}", value=f"💰 {preis}", inline=True)
-        if interaction.guild.icon:
-            embed.set_thumbnail(url=interaction.guild.icon.url)
+        apply_brand(embed, db, interaction.guild)
 
         await interaction.response.send_message(embed=embed)
     finally:
@@ -790,6 +803,7 @@ async def complete_purchase(interaction: discord.Interaction, item_id: int, edit
                 )
                 embed.add_field(name="💰 Preis", value=preis_text, inline=True)
                 embed.add_field(name="👛 Dein Guthaben danach", value=f"{(user.balance - item.price):,} ₡".replace(",", "."), inline=True)
+                apply_brand(embed, db, interaction.guild)
                 view = PurchaseConfirmView(item.id, interaction.user.id)
                 return await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
@@ -815,6 +829,7 @@ async def complete_purchase(interaction: discord.Interaction, item_id: int, edit
             color=COLOR_SUCCESS, timestamp=datetime.now(timezone.utc),
         )
         embed.add_field(name="👛 Neues Guthaben", value=f"{user.balance:,} ₡".replace(",", "."), inline=True)
+        apply_brand(embed, db, interaction.guild)
         if edit:
             await interaction.response.edit_message(content=None, embed=embed, view=None)
         else:
@@ -983,6 +998,11 @@ async def post_duty_embed(fraction: DutyFraction, changed_by: str):
         )
         embed.add_field(name="👥 Aktuell im Dienst", value=f"{fraction.on_duty} / {fraction.total}", inline=True)
         embed.add_field(name="⏱️ Stunden heute", value=f"{fraction.hours_today:.1f} h", inline=True)
+        db_brand = SessionLocal()
+        try:
+            apply_brand(embed, db_brand, channel.guild)
+        finally:
+            db_brand.close()
         await channel.send(embed=embed)
     except Exception as e:
         print(f"Konnte Dienst-Embed nicht senden: {e}")
@@ -1103,6 +1123,7 @@ async def close_ticket(interaction: discord.Interaction, ticket_id: int, closed_
             color=COLOR_DANGER, timestamp=datetime.now(timezone.utc),
         )
         embed.set_footer(text="Der Kanal wird in 5 Sekunden archiviert")
+        apply_brand(embed, db, interaction.guild)
         await interaction.response.send_message(embed=embed)
         channel = interaction.guild.get_channel(int(ticket.channel_id)) if ticket.channel_id else None
         if channel:
@@ -1170,7 +1191,7 @@ async def create_ticket_channel(interaction: discord.Interaction, grund: str, ka
         if grund and grund != "Kein Grund angegeben":
             embed.add_field(name="📝 Anliegen", value=grund, inline=False)
         embed.set_thumbnail(url=interaction.user.display_avatar.url)
-        embed.set_footer(text=interaction.guild.name, icon_url=interaction.guild.icon.url if interaction.guild.icon else None)
+        apply_brand(embed, db, interaction.guild)
         ping = f"{interaction.user.mention} {support_role.mention if support_role else ''}".strip()
         await channel.send(content=ping, embed=embed, view=TicketCloseView(ticket.id))
         await interaction.followup.send(f"✅ Dein Ticket wurde erstellt: {channel.mention}", ephemeral=True)
@@ -1207,10 +1228,14 @@ async def ticket_panel_cmd(interaction: discord.Interaction):
     finally:
         db.close()
 
-    embed = discord.Embed(title=f"🎫 {titel}", description=text, color=BRAND_COLOR)
+    embed = discord.Embed(title=f"🎫 {titel}", description=text, color=BRAND_COLOR, timestamp=datetime.now(timezone.utc))
+    db2 = SessionLocal()
+    try:
+        apply_brand(embed, db2, interaction.guild)
+    finally:
+        db2.close()
     if bild_url:
-        embed.set_image(url=bild_url)
-    embed.set_footer(text=interaction.guild.name, icon_url=interaction.guild.icon.url if interaction.guild.icon else None)
+        embed.set_image(url=bild_url)  # eigenes Panel-Banner hat Vorrang vor dem generischen
     await interaction.response.send_message(embed=embed, view=TicketPanelView(kategorien))
 
 
@@ -1249,8 +1274,12 @@ async def send_announcement(guild: discord.Guild, guild_id: str, titel: str, nac
     embed = discord.Embed(
         title=f"📢 {titel}", description=nachricht, color=BRAND_COLOR, timestamp=datetime.now(timezone.utc),
     )
-    embed.set_author(name=guild.name, icon_url=guild.icon.url if guild.icon else None)
     embed.set_footer(text="Ankündigung")
+    db2 = SessionLocal()
+    try:
+        apply_brand(embed, db2, guild)
+    finally:
+        db2.close()
     content = rolle.mention if rolle else None
     await channel.send(content=content, embed=embed)
     return channel
@@ -1753,6 +1782,7 @@ async def create_giveaway_dashboard(guild_id: str, preis: str, dauer_minuten: in
     )
     embed.add_field(name="⏰ Endet", value=f"<t:{int(ends_at.timestamp())}:R>", inline=True)
     embed.set_footer(text="Viel Glück!")
+    apply_brand(embed, db, channel.guild)
     message = await channel.send(embed=embed)
     await message.add_reaction(GIVEAWAY_EMOJI)
 
