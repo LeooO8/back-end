@@ -61,11 +61,11 @@ def get_setting_value(db, guild_id, key, default=None):
 
 
 # ---------- Einheitliches Embed-Design ----------
-BRAND_COLOR = 0xF2B705       # Gold - primäre Aktionen (Käufe, Willkommen, Ankündigungen)
+BRAND_COLOR = 0x2B2D31       # Dezentes Dunkelgrau - primäre Aktionen (Käufe, Willkommen, Ankündigungen) - kein knalliger Farbbalken mehr
 COLOR_SUCCESS = 0x57F287     # Grün - erfolgreiche Aktionen
 COLOR_DANGER = 0xED4245      # Rot - Fehler/Ablehnungen
-COLOR_INFO = 0x5865F2        # Blurple - neutrale Infos (Dienst, Tickets)
-COLOR_LOG = 0x2B2D31         # Dunkelgrau - Log-Kanal-Einträge
+COLOR_INFO = 0x2B2D31        # Dezentes Dunkelgrau - neutrale Infos (Dienst, Tickets)
+COLOR_LOG = 0x2B2D31         # Dezentes Dunkelgrau - Log-Kanal-Einträge
 
 LOG_TYPE_STYLE = {
     "shop": ("🛒", COLOR_SUCCESS),
@@ -1081,15 +1081,11 @@ def generate_case_id() -> str:
     return "S-" + "".join(random.choices(string.ascii_uppercase + string.digits, k=8))
 
 
-class TicketCloseView(discord.ui.View):
-    """Wird in den Ticket-Kanal gepostet - der Button schließt das Ticket."""
-    def __init__(self, ticket_id: int):
-        super().__init__(timeout=None)
-        self.ticket_id = ticket_id
-
-    @discord.ui.button(label="Ticket schließen", style=discord.ButtonStyle.danger, custom_id="close_ticket", emoji="🔒")
-    async def close(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await close_ticket(interaction, self.ticket_id, closed_by=interaction.user.display_name)
+# Discord "Components V2" (Container/TextDisplay/Section) - erlaubt Nachrichten ohne
+# die klassische Embed-Form (kein Farbbalken links, freiere Struktur). Verfügbar seit
+# discord.py 2.6. Wir prüfen zur Laufzeit, ob die Bibliothek das unterstützt, und
+# fallen sonst automatisch auf normale Embeds zurück - der Bot crasht so nie deswegen.
+COMPONENTS_V2 = hasattr(discord.ui, "LayoutView") and hasattr(discord.ui, "Container")
 
 
 def ticket_info_block(ticket: Ticket) -> str:
@@ -1105,6 +1101,61 @@ def ticket_info_block(ticket: Ticket) -> str:
     return "\n".join(lines)
 
 
+class TicketCloseView(discord.ui.View):
+    """Klassische Fallback-Variante (normaler Button unter einem Embed)."""
+    def __init__(self, ticket_id: int):
+        super().__init__(timeout=None)
+        self.ticket_id = ticket_id
+
+    @discord.ui.button(label="Ticket schließen", style=discord.ButtonStyle.danger, custom_id="close_ticket", emoji="🔒")
+    async def close(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await close_ticket(interaction, self.ticket_id, closed_by=interaction.user.display_name)
+
+
+if COMPONENTS_V2:
+    class TicketCloseButtonV2(discord.ui.Button):
+        def __init__(self, ticket_id: int):
+            super().__init__(label="Ticket schließen", style=discord.ButtonStyle.danger, emoji="🔒", custom_id=f"ticket_close_v2:{ticket_id}")
+            self.ticket_id = ticket_id
+
+        async def callback(self, interaction: discord.Interaction):
+            await close_ticket(interaction, self.ticket_id, closed_by=interaction.user.display_name)
+
+    class TicketContainerV2(discord.ui.Container):
+        """Baut die Ticket-Eröffnungsnachricht als eigenständigen Container statt Embed -
+        kein farbiger Seitenbalken, freiere Struktur, sieht nicht nach 'Standard-Embed' aus."""
+        def __init__(self, ticket: Ticket, mention: str, grund: str):
+            super().__init__(accent_colour=discord.Colour(COLOR_INFO))
+            self.add_item(discord.ui.TextDisplay(f"## 🎫 Neues Support-Ticket"))
+            self.add_item(discord.ui.TextDisplay(f"Hey {mention}, danke für deine Anfrage! Ein Team-Mitglied meldet sich in Kürze."))
+            self.add_item(discord.ui.Separator())
+            self.add_item(discord.ui.TextDisplay(ticket_info_block(ticket)))
+            if grund and grund != "Kein Grund angegeben":
+                self.add_item(discord.ui.TextDisplay(f"**📝 Anliegen:** {grund}"))
+            self.add_item(discord.ui.Separator())
+            self.add_item(discord.ui.ActionRow(TicketCloseButtonV2(ticket.id)))
+
+    class TicketOpenLayoutV2(discord.ui.LayoutView):
+        def __init__(self, ticket: Ticket, mention: str, grund: str):
+            super().__init__(timeout=None)
+            self.add_item(TicketContainerV2(ticket, mention, grund))
+
+    class TicketClosedContainerV2(discord.ui.Container):
+        def __init__(self, ticket: Ticket, closed_by: str):
+            super().__init__(accent_colour=discord.Colour(COLOR_DANGER))
+            self.add_item(discord.ui.TextDisplay("## ❌ Support-Fall abgeschlossen"))
+            self.add_item(discord.ui.TextDisplay(f"**{closed_by}** hat dieses Ticket geschlossen."))
+            self.add_item(discord.ui.Separator())
+            self.add_item(discord.ui.TextDisplay(ticket_info_block(ticket)))
+            self.add_item(discord.ui.Separator())
+            self.add_item(discord.ui.TextDisplay("-# Der Kanal wird in 5 Sekunden archiviert"))
+
+    class TicketClosedLayoutV2(discord.ui.LayoutView):
+        def __init__(self, ticket: Ticket, closed_by: str):
+            super().__init__(timeout=None)
+            self.add_item(TicketClosedContainerV2(ticket, closed_by))
+
+
 async def close_ticket(interaction: discord.Interaction, ticket_id: int, closed_by: str):
     db = SessionLocal()
     try:
@@ -1117,14 +1168,18 @@ async def close_ticket(interaction: discord.Interaction, ticket_id: int, closed_
         log(db, ticket.guild_id, "system", f"Ticket #{ticket.case_id or ticket.id} ({ticket.username}) wurde von {closed_by} geschlossen")
         db.commit()
 
-        embed = discord.Embed(
-            title="❌ Support-Fall abgeschlossen",
-            description=f"**{closed_by}** hat dieses Ticket geschlossen.\n\n{ticket_info_block(ticket)}",
-            color=COLOR_DANGER, timestamp=datetime.now(timezone.utc),
-        )
-        embed.set_footer(text="Der Kanal wird in 5 Sekunden archiviert")
-        apply_brand(embed, db, interaction.guild)
-        await interaction.response.send_message(embed=embed)
+        if COMPONENTS_V2:
+            await interaction.response.send_message(view=TicketClosedLayoutV2(ticket, closed_by))
+        else:
+            embed = discord.Embed(
+                title="❌ Support-Fall abgeschlossen",
+                description=f"**{closed_by}** hat dieses Ticket geschlossen.\n\n{ticket_info_block(ticket)}",
+                color=COLOR_DANGER, timestamp=datetime.now(timezone.utc),
+            )
+            embed.set_footer(text="Der Kanal wird in 5 Sekunden archiviert")
+            apply_brand(embed, db, interaction.guild)
+            await interaction.response.send_message(embed=embed)
+
         channel = interaction.guild.get_channel(int(ticket.channel_id)) if ticket.channel_id else None
         if channel:
             await asyncio.sleep(5)
@@ -1183,17 +1238,23 @@ async def create_ticket_channel(interaction: discord.Interaction, grund: str, ka
         log(db, guild_id, "system", f"{interaction.user.display_name} hat ein Ticket eröffnet ({case_id}): {grund}")
         db.commit()
 
-        embed = discord.Embed(
-            title="🎫 Neues Support-Ticket",
-            description=f"Hey {interaction.user.mention}, danke für deine Anfrage! Ein Team-Mitglied meldet sich in Kürze.\n\n{ticket_info_block(ticket)}",
-            color=COLOR_INFO, timestamp=datetime.now(timezone.utc),
-        )
-        if grund and grund != "Kein Grund angegeben":
-            embed.add_field(name="📝 Anliegen", value=grund, inline=False)
-        embed.set_thumbnail(url=interaction.user.display_avatar.url)
-        apply_brand(embed, db, interaction.guild)
         ping = f"{interaction.user.mention} {support_role.mention if support_role else ''}".strip()
-        await channel.send(content=ping, embed=embed, view=TicketCloseView(ticket.id))
+        if COMPONENTS_V2:
+            # Bei Components V2 darf 'content' nicht zusammen mit einer LayoutView gesendet
+            # werden - die Erwähnung/Ping steckt stattdessen im ersten Textbaustein.
+            view = TicketOpenLayoutV2(ticket, ping, grund)
+            await channel.send(view=view)
+        else:
+            embed = discord.Embed(
+                title="🎫 Neues Support-Ticket",
+                description=f"Hey {interaction.user.mention}, danke für deine Anfrage! Ein Team-Mitglied meldet sich in Kürze.\n\n{ticket_info_block(ticket)}",
+                color=COLOR_INFO, timestamp=datetime.now(timezone.utc),
+            )
+            if grund and grund != "Kein Grund angegeben":
+                embed.add_field(name="📝 Anliegen", value=grund, inline=False)
+            embed.set_thumbnail(url=interaction.user.display_avatar.url)
+            apply_brand(embed, db, interaction.guild)
+            await channel.send(content=ping, embed=embed, view=TicketCloseView(ticket.id))
         await interaction.followup.send(f"✅ Dein Ticket wurde erstellt: {channel.mention}", ephemeral=True)
     finally:
         db.close()
@@ -1209,9 +1270,25 @@ class TicketCategorySelect(discord.ui.Select):
 
 
 class TicketPanelView(discord.ui.View):
+    """Fallback-Panel (normaler View unter einem Embed)."""
     def __init__(self, categories: list[str]):
         super().__init__(timeout=None)
         self.add_item(TicketCategorySelect(categories))
+
+
+if COMPONENTS_V2:
+    class TicketPanelContainerV2(discord.ui.Container):
+        def __init__(self, titel: str, text: str, categories: list[str]):
+            super().__init__(accent_colour=discord.Colour(BRAND_COLOR))
+            self.add_item(discord.ui.TextDisplay(f"## 🎫 {titel}"))
+            self.add_item(discord.ui.TextDisplay(text))
+            self.add_item(discord.ui.Separator())
+            self.add_item(discord.ui.ActionRow(TicketCategorySelect(categories)))
+
+    class TicketPanelLayoutV2(discord.ui.LayoutView):
+        def __init__(self, titel: str, text: str, categories: list[str]):
+            super().__init__(timeout=None)
+            self.add_item(TicketPanelContainerV2(titel, text, categories))
 
 
 @bot.tree.command(name="ticket_panel", description="[Admin] Postet ein Ticket-Panel mit Kategorie-Auswahl in diesen Kanal")
@@ -1228,15 +1305,18 @@ async def ticket_panel_cmd(interaction: discord.Interaction):
     finally:
         db.close()
 
-    embed = discord.Embed(title=f"🎫 {titel}", description=text, color=BRAND_COLOR, timestamp=datetime.now(timezone.utc))
-    db2 = SessionLocal()
-    try:
-        apply_brand(embed, db2, interaction.guild)
-    finally:
-        db2.close()
-    if bild_url:
-        embed.set_image(url=bild_url)  # eigenes Panel-Banner hat Vorrang vor dem generischen
-    await interaction.response.send_message(embed=embed, view=TicketPanelView(kategorien))
+    if COMPONENTS_V2:
+        await interaction.response.send_message(view=TicketPanelLayoutV2(titel, text, kategorien))
+    else:
+        embed = discord.Embed(title=f"🎫 {titel}", description=text, color=BRAND_COLOR, timestamp=datetime.now(timezone.utc))
+        db2 = SessionLocal()
+        try:
+            apply_brand(embed, db2, interaction.guild)
+        finally:
+            db2.close()
+        if bild_url:
+            embed.set_image(url=bild_url)
+        await interaction.response.send_message(embed=embed, view=TicketPanelView(kategorien))
 
 
 @bot.tree.command(name="ticket", description="Öffnet ein neues Support-Ticket")
