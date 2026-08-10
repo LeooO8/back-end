@@ -1113,48 +1113,71 @@ async def get_ticket_card_base(url: str) -> "Image.Image | None":
         return None
 
 
+def draw_row_icon(draw: "ImageDraw.ImageDraw", cx: float, cy: float, r: float, label: str, color: tuple):
+    """Zeichnet ein kleines, zum Zeileninhalt passendes Icon (Uhr, Person, Tag,
+    Kategorie-Raute) frei mit einfachen Formen - kein Emoji-Font nötig, läuft
+    also überall zuverlässig, egal welche Schriftarten auf dem Server verfügbar sind."""
+    l = label.lower()
+    if "erstellt" in l or "zeit" in l or "datum" in l:
+        draw.ellipse((cx - r, cy - r, cx + r, cy + r), outline=color, width=2)
+        draw.line((cx, cy, cx, cy - r * 0.6), fill=color, width=2)
+        draw.line((cx, cy, cx + r * 0.5, cy + r * 0.2), fill=color, width=2)
+    elif "nutzer" in l or "user" in l or "geschlossen" in l or "team" in l:
+        draw.ellipse((cx - r * 0.5, cy - r, cx + r * 0.5, cy - r * 0.1), fill=color)
+        draw.pieslice((cx - r, cy - r * 0.1, cx + r, cy + r * 1.6), 180, 360, fill=color)
+    elif "case" in l or "id" in l:
+        draw.rounded_rectangle((cx - r, cy - r * 0.8, cx + r, cy + r * 0.8), radius=r * 0.25, outline=color, width=2)
+        draw.line((cx - r * 0.5, cy, cx + r * 0.5, cy), fill=color, width=2)
+        draw.line((cx - r * 0.5, cy + r * 0.4, cx + r * 0.2, cy + r * 0.4), fill=color, width=2)
+    elif "kategorie" in l:
+        draw.polygon([(cx - r, cy), (cx, cy - r), (cx + r, cy), (cx, cy + r)], outline=color, width=2)
+        draw.ellipse((cx - r * 0.15, cy - r * 0.15, cx + r * 0.15, cy + r * 0.15), fill=color)
+    else:
+        draw.ellipse((cx - r * 0.4, cy - r * 0.4, cx + r * 0.4, cy + r * 0.4), fill=color)
+
+
 def draw_ticket_card(base: "Image.Image", title: str, intro: str, rows: list[tuple[str, str]], accent: tuple = (114, 137, 218), eyebrow: str = None) -> io.BytesIO:
     """Zeichnet optional ein kleines Kategorie-Label, Titel, Icon-Badge,
-    Einleitungstext und Info-'Chips' (Label, Wert) direkt auf die Grundplatte.
-    Gibt ein fertiges PNG als BytesIO zurück. Skaliert Zeilenhöhe/Abstände
-    automatisch runter, falls viele Zeilen sonst über den unteren Rand
-    der Grundplatte hinausragen würden."""
+    Einleitungstext und kompakte Info-'Chips' (mit kleinem gezeichnetem Icon,
+    Label, Wert) direkt auf die Grundplatte. Gibt ein fertiges PNG als
+    BytesIO zurück. Skaliert Zeilenhöhe/Abstände automatisch runter, falls
+    viele Zeilen sonst über den unteren Rand der Grundplatte hinausragen würden."""
     base = base.copy()
     w, h = base.size
     accent_rgba = (*accent, 255)
 
     TEXT_MAIN = (255, 255, 255, 255)
-    TEXT_SUB = (185, 187, 195, 255)
-    TEXT_LABEL = (150, 152, 165, 255)
+    TEXT_SUB = (190, 192, 200, 255)
+    TEXT_LABEL = (155, 157, 170, 255)
     TEXT_EYEBROW = (170, 172, 185, 255)
-    CHIP_FILL = (255, 255, 255, 22)
+    CHIP_FILL = (255, 255, 255, 20)
 
-    font_title = _load_font(_FONT_TITLE_PATHS, max(20, w // 20))
-    font_label = _load_font(_FONT_TITLE_PATHS, max(10, w // 47))
-    font_value = _load_font(_FONT_TEXT_PATHS, max(13, w // 36))
-    font_intro = _load_font(_FONT_TEXT_PATHS, max(12, w // 38))
-    font_eyebrow = _load_font(_FONT_TITLE_PATHS, max(11, w // 44))
+    # -- mittlere Größe: kompakt, aber nicht zu winzig --
+    font_title = _load_font(_FONT_TITLE_PATHS, max(18, w // 22))
+    font_label = _load_font(_FONT_TITLE_PATHS, max(10, w // 48))
+    font_value = _load_font(_FONT_TEXT_PATHS, max(12, w // 38))
+    font_intro = _load_font(_FONT_TEXT_PATHS, max(11, w // 40))
+    font_eyebrow = _load_font(_FONT_TITLE_PATHS, max(10, w // 47))
 
-    pad_x = int(w * 0.055)
-    top = int(h * 0.16)
+    pad_x = int(w * 0.05)
+    top = int(h * 0.15)
     eyebrow_height = 0
     if eyebrow:
-        eyebrow_height = font_eyebrow.size + 14
+        eyebrow_height = font_eyebrow.size + 10
         top += eyebrow_height
-    bottom_margin = int(h * 0.06)
-    badge_size = int(font_title.size * 1.35)
-    chip_gap = 10
+    bottom_margin = int(h * 0.045)
+    badge_size = int(font_title.size * 1.25)
+    chip_gap = 8
 
     wrap_width = max(20, int((w - 2 * pad_x) / (font_intro.size * 0.52)))
     intro_lines = textwrap.wrap(intro, width=wrap_width) if intro else []
-    header_height = badge_size + 22 + len(intro_lines) * (font_intro.size + 8) + 16
+    header_height = badge_size + 18 + len(intro_lines) * (font_intro.size + 6) + 12
 
-    # Verfügbarer Platz für die Chips - falls zu wenig, Zeilenhöhe proportional schrumpfen
     available = h - bottom_margin - top - header_height
-    chip_h_ideal = int(badge_size * 1.1)
+    chip_h_ideal = int(badge_size * 1.05)
     needed = len(rows) * (chip_h_ideal + chip_gap) - chip_gap if rows else 0
     scale = min(1.0, max(0.55, available / needed)) if needed > 0 else 1.0
-    chip_h = max(24, int(chip_h_ideal * scale))
+    chip_h = max(22, int(chip_h_ideal * scale))
     chip_gap_s = max(5, int(chip_gap * scale))
     if scale < 1.0:
         font_label = _load_font(_FONT_TITLE_PATHS, max(9, int(font_label.size * scale)))
@@ -1165,37 +1188,39 @@ def draw_ticket_card(base: "Image.Image", title: str, intro: str, rows: list[tup
     odraw = ImageDraw.Draw(overlay)
     yy = y
     for _ in rows:
-        odraw.rounded_rectangle((pad_x, yy, w - pad_x, yy + chip_h), radius=10, fill=CHIP_FILL)
+        odraw.rounded_rectangle((pad_x, yy, w - pad_x, yy + chip_h), radius=9, fill=CHIP_FILL)
         yy += chip_h + chip_gap_s
 
     composed = Image.alpha_composite(base, overlay)
     draw = ImageDraw.Draw(composed, "RGBA")
 
     if eyebrow:
-        draw.text((pad_x, int(h * 0.16)), eyebrow.upper(), font=font_eyebrow, fill=TEXT_EYEBROW)
+        draw.text((pad_x, int(h * 0.15)), eyebrow.upper(), font=font_eyebrow, fill=TEXT_EYEBROW)
 
     y = top
-    draw.rounded_rectangle((pad_x, y, pad_x + badge_size, y + badge_size), radius=int(badge_size * 0.28), fill=accent_rgba)
+    draw.rounded_rectangle((pad_x, y, pad_x + badge_size, y + badge_size), radius=int(badge_size * 0.27), fill=accent_rgba)
     cx, cy = pad_x + badge_size // 2, y + badge_size // 2
     r = max(2, badge_size // 7)
     draw.ellipse((cx - 2 * r - 1, cy - r - 1, cx - 1, cy - 1), fill=(255, 255, 255, 255))
     draw.ellipse((cx + 1, cy + 1, cx + 2 * r + 1, cy + r + 1), fill=(255, 255, 255, 255))
     draw.line((cx - 2 * r, cy - r, cx + 2 * r, cy + r), fill=accent_rgba, width=max(2, r))
 
-    draw.text((pad_x + badge_size + 14, y + badge_size // 2 - font_title.size // 2 - 2), title, font=font_title, fill=TEXT_MAIN)
-    y += badge_size + 22
+    draw.text((pad_x + badge_size + 12, y + badge_size // 2 - font_title.size // 2 - 1), title, font=font_title, fill=TEXT_MAIN)
+    y += badge_size + 18
 
     for line in intro_lines:
         draw.text((pad_x, y), line, font=font_intro, fill=TEXT_SUB)
-        y += font_intro.size + 8
-    y += 16
+        y += font_intro.size + 6
+    y += 12
 
+    icon_r = max(7, int(chip_h * 0.25))
     for label, value in rows:
-        dot_r = max(3, chip_h // 11)
-        draw.ellipse((pad_x + 16 - dot_r, y + chip_h // 2 - dot_r, pad_x + 16 + dot_r, y + chip_h // 2 + dot_r), fill=accent_rgba)
-        text_x = pad_x + 32
-        draw.text((text_x, y + chip_h * 0.16), label, font=font_label, fill=TEXT_LABEL)
-        draw.text((text_x, y + chip_h * 0.48), value, font=font_value, fill=TEXT_MAIN)
+        icon_cx = pad_x + 16
+        icon_cy = y + chip_h // 2
+        draw_row_icon(draw, icon_cx, icon_cy, icon_r, label, accent_rgba)
+        text_x = pad_x + 16 + icon_r + 13
+        draw.text((text_x, y + chip_h * 0.15), label, font=font_label, fill=TEXT_LABEL)
+        draw.text((text_x, y + chip_h * 0.47), value, font=font_value, fill=TEXT_MAIN)
         y += chip_h + chip_gap_s
 
     buf = io.BytesIO()
