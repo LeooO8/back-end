@@ -121,6 +121,7 @@ class Ticket(Base):
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     closed_at = Column(DateTime, nullable=True)
     closed_by = Column(String, nullable=True)      # Username, der das Ticket geschlossen hat
+    claimed_by = Column(String, nullable=True)      # Username des Team-Mitglieds, das sich zuständig gemeldet hat
 
 
 class Todo(Base):
