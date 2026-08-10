@@ -1113,45 +1113,88 @@ async def get_ticket_card_base(url: str) -> "Image.Image | None":
         return None
 
 
-def draw_ticket_card(base: "Image.Image", title: str, intro: str, rows: list[tuple[str, str]]) -> io.BytesIO:
-    """Zeichnet Titel, Einleitungstext und Info-Zeilen (Label, Wert) direkt auf die
-    Grundplatte. Gibt ein fertiges PNG als BytesIO zurück, bereit zum Versenden."""
-    img = base.copy()
-    draw = ImageDraw.Draw(img)
-    w, h = img.size
+def draw_ticket_card(base: "Image.Image", title: str, intro: str, rows: list[tuple[str, str]], accent: tuple = (114, 137, 218)) -> io.BytesIO:
+    """Zeichnet Titel, Icon-Badge, Einleitungstext und Info-'Chips' (Label, Wert)
+    direkt auf die Grundplatte. Gibt ein fertiges PNG als BytesIO zurück.
+    Skaliert Zeilenhöhe/Abstände automatisch runter, falls viele Zeilen sonst
+    über den unteren Rand der Grundplatte hinausragen würden."""
+    base = base.copy()
+    w, h = base.size
+    accent_rgba = (*accent, 255)
 
-    font_title = _load_font(_FONT_TITLE_PATHS, max(18, w // 24))
-    font_text = _load_font(_FONT_TEXT_PATHS, max(12, w // 36))
-    font_label = _load_font(_FONT_TITLE_PATHS, max(12, w // 36))
+    TEXT_MAIN = (255, 255, 255, 255)
+    TEXT_SUB = (185, 187, 195, 255)
+    TEXT_LABEL = (150, 152, 165, 255)
+    CHIP_FILL = (255, 255, 255, 22)
 
-    pad_x = int(w * 0.05)
-    y = int(h * 0.16)
+    font_title = _load_font(_FONT_TITLE_PATHS, max(20, w // 20))
+    font_label = _load_font(_FONT_TITLE_PATHS, max(10, w // 47))
+    font_value = _load_font(_FONT_TEXT_PATHS, max(13, w // 36))
+    font_intro = _load_font(_FONT_TEXT_PATHS, max(12, w // 38))
 
-    draw.text((pad_x, y), title, font=font_title, fill=(255, 255, 255, 255))
-    y += font_title.size + 16
+    pad_x = int(w * 0.055)
+    top = int(h * 0.16)
+    bottom_margin = int(h * 0.06)
+    badge_size = int(font_title.size * 1.35)
+    chip_gap = 10
 
-    wrap_width = max(30, int((w - 2 * pad_x) / (font_text.size * 0.55)))
-    for line in textwrap.wrap(intro, width=wrap_width):
-        draw.text((pad_x, y), line, font=font_text, fill=(200, 200, 205, 255))
-        y += font_text.size + 8
+    wrap_width = max(20, int((w - 2 * pad_x) / (font_intro.size * 0.52)))
+    intro_lines = textwrap.wrap(intro, width=wrap_width) if intro else []
+    header_height = badge_size + 22 + len(intro_lines) * (font_intro.size + 8) + 16
 
-    y += 12
-    draw.line([(pad_x, y), (w - pad_x, y)], fill=(90, 90, 95, 255), width=1)
+    # Verfügbarer Platz für die Chips - falls zu wenig, Zeilenhöhe proportional schrumpfen
+    available = h - bottom_margin - top - header_height
+    chip_h_ideal = int(badge_size * 1.1)
+    needed = len(rows) * (chip_h_ideal + chip_gap) - chip_gap if rows else 0
+    scale = min(1.0, max(0.55, available / needed)) if needed > 0 else 1.0
+    chip_h = max(24, int(chip_h_ideal * scale))
+    chip_gap_s = max(5, int(chip_gap * scale))
+    if scale < 1.0:
+        font_label = _load_font(_FONT_TITLE_PATHS, max(9, int(font_label.size * scale)))
+        font_value = _load_font(_FONT_TEXT_PATHS, max(11, int(font_value.size * scale)))
+
+    y = top + header_height
+    overlay = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    odraw = ImageDraw.Draw(overlay)
+    yy = y
+    for _ in rows:
+        odraw.rounded_rectangle((pad_x, yy, w - pad_x, yy + chip_h), radius=10, fill=CHIP_FILL)
+        yy += chip_h + chip_gap_s
+
+    composed = Image.alpha_composite(base, overlay)
+    draw = ImageDraw.Draw(composed, "RGBA")
+
+    y = top
+    draw.rounded_rectangle((pad_x, y, pad_x + badge_size, y + badge_size), radius=int(badge_size * 0.28), fill=accent_rgba)
+    cx, cy = pad_x + badge_size // 2, y + badge_size // 2
+    r = max(2, badge_size // 7)
+    draw.ellipse((cx - 2 * r - 1, cy - r - 1, cx - 1, cy - 1), fill=(255, 255, 255, 255))
+    draw.ellipse((cx + 1, cy + 1, cx + 2 * r + 1, cy + r + 1), fill=(255, 255, 255, 255))
+    draw.line((cx - 2 * r, cy - r, cx + 2 * r, cy + r), fill=accent_rgba, width=max(2, r))
+
+    draw.text((pad_x + badge_size + 14, y + badge_size // 2 - font_title.size // 2 - 2), title, font=font_title, fill=TEXT_MAIN)
+    y += badge_size + 22
+
+    for line in intro_lines:
+        draw.text((pad_x, y), line, font=font_intro, fill=TEXT_SUB)
+        y += font_intro.size + 8
     y += 16
 
-    label_width = int(w * 0.24)
     for label, value in rows:
-        draw.text((pad_x, y), f"• {label}:", font=font_label, fill=(255, 255, 255, 255))
-        draw.text((pad_x + label_width, y), value, font=font_text, fill=(180, 180, 190, 255))
-        y += font_text.size + 10
+        dot_r = max(3, chip_h // 11)
+        draw.ellipse((pad_x + 16 - dot_r, y + chip_h // 2 - dot_r, pad_x + 16 + dot_r, y + chip_h // 2 + dot_r), fill=accent_rgba)
+        text_x = pad_x + 32
+        draw.text((text_x, y + chip_h * 0.16), label, font=font_label, fill=TEXT_LABEL)
+        draw.text((text_x, y + chip_h * 0.48), value, font=font_value, fill=TEXT_MAIN)
+        y += chip_h + chip_gap_s
 
     buf = io.BytesIO()
-    img.save(buf, format="PNG")
+    composed.save(buf, format="PNG")
     buf.seek(0)
     return buf
 
 
-async def build_ticket_card_file(db, guild_id: str, title: str, intro: str, rows: list[tuple[str, str]]) -> "discord.File | None":
+async def build_ticket_card_file(db, guild_id: str, title: str, intro: str, rows: list[tuple[str, str]], accent: tuple = (114, 137, 218)) -> "discord.File | None":
     """Baut die fertige Ticket-Karte als discord.File, falls eine Grundplatte
     hinterlegt ist (Setting 'ticket_karte_grundplatte_url'). Gibt None zurück,
     wenn keine Grundplatte gesetzt ist oder das Laden/Zeichnen fehlschlägt -
@@ -1163,7 +1206,7 @@ async def build_ticket_card_file(db, guild_id: str, title: str, intro: str, rows
     if base is None:
         return None
     try:
-        buf = draw_ticket_card(base, title, intro, rows)
+        buf = draw_ticket_card(base, title, intro, rows, accent=accent)
         return discord.File(buf, filename="ticket.png")
     except Exception as e:
         print(f"Konnte Ticket-Karte nicht zeichnen: {e}")
@@ -1269,7 +1312,7 @@ async def close_ticket(interaction: discord.Interaction, ticket_id: int, closed_
         card_file = await build_ticket_card_file(
             db, ticket.guild_id, "Support-Fall abgeschlossen",
             f"{closed_by} hat dieses Ticket geschlossen. Der Kanal wird in 5 Sekunden archiviert.",
-            rows,
+            rows, accent=(237, 66, 69),
         )
 
         if card_file:
