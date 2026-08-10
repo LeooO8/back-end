@@ -1102,14 +1102,15 @@ async def get_ticket_card_base(url: str) -> "Image.Image | None":
     if url in _TICKET_CARD_BASE_CACHE:
         return _TICKET_CARD_BASE_CACHE[url].copy()
     try:
-        async with httpx.AsyncClient(timeout=10) as client:
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"}
+        async with httpx.AsyncClient(timeout=10, headers=headers, follow_redirects=True) as client:
             resp = await client.get(url)
             resp.raise_for_status()
         img = Image.open(io.BytesIO(resp.content)).convert("RGBA")
         _TICKET_CARD_BASE_CACHE[url] = img
         return img.copy()
     except Exception as e:
-        print(f"Konnte Ticket-Karten-Grundplatte nicht laden: {e}")
+        print(f"Konnte Ticket-Karten-Grundplatte nicht laden ({url}): {e}")
         return None
 
 
