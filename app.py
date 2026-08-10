@@ -1113,11 +1113,12 @@ async def get_ticket_card_base(url: str) -> "Image.Image | None":
         return None
 
 
-def draw_ticket_card(base: "Image.Image", title: str, intro: str, rows: list[tuple[str, str]], accent: tuple = (114, 137, 218)) -> io.BytesIO:
-    """Zeichnet Titel, Icon-Badge, Einleitungstext und Info-'Chips' (Label, Wert)
-    direkt auf die Grundplatte. Gibt ein fertiges PNG als BytesIO zurück.
-    Skaliert Zeilenhöhe/Abstände automatisch runter, falls viele Zeilen sonst
-    über den unteren Rand der Grundplatte hinausragen würden."""
+def draw_ticket_card(base: "Image.Image", title: str, intro: str, rows: list[tuple[str, str]], accent: tuple = (114, 137, 218), eyebrow: str = None) -> io.BytesIO:
+    """Zeichnet optional ein kleines Kategorie-Label, Titel, Icon-Badge,
+    Einleitungstext und Info-'Chips' (Label, Wert) direkt auf die Grundplatte.
+    Gibt ein fertiges PNG als BytesIO zurück. Skaliert Zeilenhöhe/Abstände
+    automatisch runter, falls viele Zeilen sonst über den unteren Rand
+    der Grundplatte hinausragen würden."""
     base = base.copy()
     w, h = base.size
     accent_rgba = (*accent, 255)
@@ -1125,15 +1126,21 @@ def draw_ticket_card(base: "Image.Image", title: str, intro: str, rows: list[tup
     TEXT_MAIN = (255, 255, 255, 255)
     TEXT_SUB = (185, 187, 195, 255)
     TEXT_LABEL = (150, 152, 165, 255)
+    TEXT_EYEBROW = (170, 172, 185, 255)
     CHIP_FILL = (255, 255, 255, 22)
 
     font_title = _load_font(_FONT_TITLE_PATHS, max(20, w // 20))
     font_label = _load_font(_FONT_TITLE_PATHS, max(10, w // 47))
     font_value = _load_font(_FONT_TEXT_PATHS, max(13, w // 36))
     font_intro = _load_font(_FONT_TEXT_PATHS, max(12, w // 38))
+    font_eyebrow = _load_font(_FONT_TITLE_PATHS, max(11, w // 44))
 
     pad_x = int(w * 0.055)
     top = int(h * 0.16)
+    eyebrow_height = 0
+    if eyebrow:
+        eyebrow_height = font_eyebrow.size + 14
+        top += eyebrow_height
     bottom_margin = int(h * 0.06)
     badge_size = int(font_title.size * 1.35)
     chip_gap = 10
@@ -1163,6 +1170,9 @@ def draw_ticket_card(base: "Image.Image", title: str, intro: str, rows: list[tup
 
     composed = Image.alpha_composite(base, overlay)
     draw = ImageDraw.Draw(composed, "RGBA")
+
+    if eyebrow:
+        draw.text((pad_x, int(h * 0.16)), eyebrow.upper(), font=font_eyebrow, fill=TEXT_EYEBROW)
 
     y = top
     draw.rounded_rectangle((pad_x, y, pad_x + badge_size, y + badge_size), radius=int(badge_size * 0.28), fill=accent_rgba)
@@ -1194,7 +1204,7 @@ def draw_ticket_card(base: "Image.Image", title: str, intro: str, rows: list[tup
     return buf
 
 
-async def build_ticket_card_file(db, guild_id: str, title: str, intro: str, rows: list[tuple[str, str]], accent: tuple = (114, 137, 218)) -> "discord.File | None":
+async def build_ticket_card_file(db, guild_id: str, title: str, intro: str, rows: list[tuple[str, str]], accent: tuple = (114, 137, 218), eyebrow: str = None) -> "discord.File | None":
     """Baut die fertige Ticket-Karte als discord.File, falls eine Grundplatte
     hinterlegt ist (Setting 'ticket_karte_grundplatte_url'). Gibt None zurück,
     wenn keine Grundplatte gesetzt ist oder das Laden/Zeichnen fehlschlägt -
@@ -1206,7 +1216,7 @@ async def build_ticket_card_file(db, guild_id: str, title: str, intro: str, rows
     if base is None:
         return None
     try:
-        buf = draw_ticket_card(base, title, intro, rows, accent=accent)
+        buf = draw_ticket_card(base, title, intro, rows, accent=accent, eyebrow=eyebrow)
         return discord.File(buf, filename="ticket.png")
     except Exception as e:
         print(f"Konnte Ticket-Karte nicht zeichnen: {e}")
@@ -1238,11 +1248,31 @@ def ticket_info_block(ticket: Ticket) -> str:
     return "\n".join(lines)
 
 
+async def claim_ticket(interaction: discord.Interaction, ticket_id: int):
+    db = SessionLocal()
+    try:
+        ticket = db.query(Ticket).get(ticket_id)
+        if not ticket or ticket.status == "geschlossen":
+            return await interaction.response.send_message("Dieses Ticket ist nicht mehr offen.", ephemeral=True)
+        if ticket.claimed_by:
+            return await interaction.response.send_message(f"Dieses Ticket wurde bereits von **{ticket.claimed_by}** übernommen.", ephemeral=True)
+        ticket.claimed_by = interaction.user.display_name
+        log(db, ticket.guild_id, "system", f"Ticket #{ticket.case_id or ticket.id} wurde von {interaction.user.display_name} übernommen")
+        db.commit()
+        await interaction.response.send_message(f"✅ **{interaction.user.display_name}** kümmert sich jetzt um dieses Ticket.")
+    finally:
+        db.close()
+
+
 class TicketCloseView(discord.ui.View):
-    """Klassische Fallback-Variante (normaler Button unter einem Embed)."""
+    """Klassische Fallback-Variante (normale Buttons unter einem Embed)."""
     def __init__(self, ticket_id: int):
         super().__init__(timeout=None)
         self.ticket_id = ticket_id
+
+    @discord.ui.button(label="Übernehmen", style=discord.ButtonStyle.secondary, custom_id="claim_ticket", emoji="✅")
+    async def claim(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await claim_ticket(interaction, self.ticket_id)
 
     @discord.ui.button(label="Ticket schließen", style=discord.ButtonStyle.danger, custom_id="close_ticket", emoji="🔒")
     async def close(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -1250,6 +1280,14 @@ class TicketCloseView(discord.ui.View):
 
 
 if COMPONENTS_V2:
+    class TicketClaimButtonV2(discord.ui.Button):
+        def __init__(self, ticket_id: int):
+            super().__init__(label="Übernehmen", style=discord.ButtonStyle.secondary, emoji="✅", custom_id=f"ticket_claim_v2:{ticket_id}")
+            self.ticket_id = ticket_id
+
+        async def callback(self, interaction: discord.Interaction):
+            await claim_ticket(interaction, self.ticket_id)
+
     class TicketCloseButtonV2(discord.ui.Button):
         def __init__(self, ticket_id: int):
             super().__init__(label="Ticket schließen", style=discord.ButtonStyle.danger, emoji="🔒", custom_id=f"ticket_close_v2:{ticket_id}")
@@ -1270,7 +1308,7 @@ if COMPONENTS_V2:
             if grund and grund != "Kein Grund angegeben":
                 self.add_item(discord.ui.TextDisplay(f"**📝 Anliegen:** {grund}"))
             self.add_item(discord.ui.Separator())
-            self.add_item(discord.ui.ActionRow(TicketCloseButtonV2(ticket.id)))
+            self.add_item(discord.ui.ActionRow(TicketClaimButtonV2(ticket.id), TicketCloseButtonV2(ticket.id)))
 
     class TicketOpenLayoutV2(discord.ui.LayoutView):
         def __init__(self, ticket: Ticket, mention: str, grund: str):
@@ -1306,13 +1344,12 @@ async def close_ticket(interaction: discord.Interaction, ticket_id: int, closed_
         db.commit()
 
         rows = [("CaseID", f"#{ticket.case_id or ticket.id}")]
-        if ticket.category:
-            rows.append(("Kategorie", ticket.category))
-        rows += [("Nutzer", ticket.username), ("Geschlossen von", closed_by)]
+        rows += [("Erstellt am", ticket.created_at.strftime("%d. %B %Y um %H:%M") if ticket.created_at else "—")]
+        rows += [("Nutzer", ticket.username)]
         card_file = await build_ticket_card_file(
             db, ticket.guild_id, "Support-Fall abgeschlossen",
-            f"{closed_by} hat dieses Ticket geschlossen. Der Kanal wird in 5 Sekunden archiviert.",
-            rows, accent=(237, 66, 69),
+            f"@{ticket.username} braucht keine Hilfe mehr!",
+            rows, accent=(237, 66, 69), eyebrow=ticket.category or "Support",
         )
 
         if card_file:
@@ -1390,13 +1427,11 @@ async def create_ticket_channel(interaction: discord.Interaction, grund: str, ka
         ping = f"{interaction.user.mention} {support_role.mention if support_role else ''}".strip()
 
         rows = [("CaseID", f"#{ticket.case_id}"), ("Erstellt am", ticket.created_at.strftime("%d. %B %Y um %H:%M"))]
-        if ticket.category:
-            rows.insert(1, ("Kategorie", ticket.category))
         rows.append(("Nutzer", interaction.user.display_name))
         card_file = await build_ticket_card_file(
             db, guild_id, "Neues Support-Ticket",
             f"Hey {interaction.user.display_name}, danke für deine Anfrage! Ein Team-Mitglied meldet sich in Kürze.",
-            rows,
+            rows, eyebrow=ticket.category or "Support",
         )
 
         if card_file:
