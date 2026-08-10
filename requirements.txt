@@ -5,3 +5,4 @@ httpx
 pyjwt
 python-multipart
 discord.py
+Pillow
