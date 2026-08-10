@@ -46,6 +46,7 @@ def init_db():
             "ALTER TABLE shop_items ADD COLUMN role_id VARCHAR",
             "ALTER TABLE tickets ADD COLUMN category VARCHAR",
             "ALTER TABLE tickets ADD COLUMN case_id VARCHAR",
+            "ALTER TABLE tickets ADD COLUMN claimed_by VARCHAR",
         ]:
             try:
                 conn.execute(text(stmt))
