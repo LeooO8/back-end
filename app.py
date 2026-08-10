@@ -1139,90 +1139,99 @@ def draw_row_icon(draw: "ImageDraw.ImageDraw", cx: float, cy: float, r: float, l
 
 def draw_ticket_card(base: "Image.Image", title: str, intro: str, rows: list[tuple[str, str]], accent: tuple = (114, 137, 218), eyebrow: str = None) -> io.BytesIO:
     """Zeichnet optional ein kleines Kategorie-Label, Titel, Icon-Badge,
-    Einleitungstext und kompakte Info-'Chips' (mit kleinem gezeichnetem Icon,
-    Label, Wert) direkt auf die Grundplatte. Gibt ein fertiges PNG als
-    BytesIO zurück. Skaliert Zeilenhöhe/Abstände automatisch runter, falls
-    viele Zeilen sonst über den unteren Rand der Grundplatte hinausragen würden."""
+    Einleitungstext und Info-'Chips' (mit kleinem gezeichnetem Icon, Label,
+    Wert) direkt auf die Grundplatte. Gibt ein fertiges PNG als BytesIO
+    zurück. Orientiert sich an der Höhe der Grundplatte (nicht nur an der
+    Breite), damit der Inhalt bei größeren/höheren Vorlagen nicht winzig
+    wirkt. Ist der Inhalt kleiner als der verfügbare Platz, wird er dezent
+    Richtung Mitte gerückt statt oben zu kleben; ist zuwenig Platz, werden
+    die Zeilen automatisch verkleinert statt abgeschnitten zu werden."""
     base = base.copy()
     w, h = base.size
     accent_rgba = (*accent, 255)
 
     TEXT_MAIN = (255, 255, 255, 255)
-    TEXT_SUB = (190, 192, 200, 255)
-    TEXT_LABEL = (155, 157, 170, 255)
-    TEXT_EYEBROW = (170, 172, 185, 255)
+    TEXT_SUB = (195, 197, 205, 255)
+    TEXT_LABEL = (160, 162, 175, 255)
+    TEXT_EYEBROW = (180, 182, 195, 255)
     CHIP_FILL = (255, 255, 255, 20)
 
-    # -- mittlere Größe: kompakt, aber nicht zu winzig --
-    font_title = _load_font(_FONT_TITLE_PATHS, max(18, w // 22))
-    font_label = _load_font(_FONT_TITLE_PATHS, max(10, w // 48))
-    font_value = _load_font(_FONT_TEXT_PATHS, max(12, w // 38))
-    font_intro = _load_font(_FONT_TEXT_PATHS, max(11, w // 40))
-    font_eyebrow = _load_font(_FONT_TITLE_PATHS, max(10, w // 47))
+    ref = min(w, h * 1.8)  # verhindert Riesenschrift bei sehr breiten, flachen Bildern
+    font_title = _load_font(_FONT_TITLE_PATHS, max(22, int(ref / 15)))
+    font_label = _load_font(_FONT_TITLE_PATHS, max(12, int(ref / 34)))
+    font_value = _load_font(_FONT_TEXT_PATHS, max(15, int(ref / 26)))
+    font_intro = _load_font(_FONT_TEXT_PATHS, max(13, int(ref / 28)))
+    font_eyebrow = _load_font(_FONT_TITLE_PATHS, max(12, int(ref / 32)))
 
-    pad_x = int(w * 0.05)
-    top = int(h * 0.15)
-    eyebrow_height = 0
-    if eyebrow:
-        eyebrow_height = font_eyebrow.size + 10
-        top += eyebrow_height
-    bottom_margin = int(h * 0.045)
-    badge_size = int(font_title.size * 1.25)
-    chip_gap = 8
+    pad_x = int(w * 0.055)
+    top_start = int(h * 0.15)
+    eyebrow_height = (font_eyebrow.size + 12) if eyebrow else 0
+    bottom_margin = int(h * 0.06)
+    badge_size = int(font_title.size * 1.3)
+    chip_gap = 12
 
     wrap_width = max(20, int((w - 2 * pad_x) / (font_intro.size * 0.52)))
     intro_lines = textwrap.wrap(intro, width=wrap_width) if intro else []
-    header_height = badge_size + 18 + len(intro_lines) * (font_intro.size + 6) + 12
+    header_height = eyebrow_height + badge_size + 20 + len(intro_lines) * (font_intro.size + 7) + 14
 
-    available = h - bottom_margin - top - header_height
-    chip_h_ideal = int(badge_size * 1.05)
-    needed = len(rows) * (chip_h_ideal + chip_gap) - chip_gap if rows else 0
-    scale = min(1.0, max(0.55, available / needed)) if needed > 0 else 1.0
-    chip_h = max(22, int(chip_h_ideal * scale))
-    chip_gap_s = max(5, int(chip_gap * scale))
-    if scale < 1.0:
-        font_label = _load_font(_FONT_TITLE_PATHS, max(9, int(font_label.size * scale)))
-        font_value = _load_font(_FONT_TEXT_PATHS, max(11, int(font_value.size * scale)))
+    chip_h_ideal = int(badge_size * 1.15)
+    ideal_rows_height = len(rows) * (chip_h_ideal + chip_gap) - chip_gap if rows else 0
+    total_content_height = header_height + ideal_rows_height
+    available_total = h - top_start - bottom_margin
 
-    y = top + header_height
+    if total_content_height < available_total:
+        # Platz übrig -> Inhalt etwas Richtung Mitte rücken statt oben kleben zu lassen
+        top = top_start + (available_total - total_content_height) // 3
+        chip_h, chip_gap_s = chip_h_ideal, chip_gap
+    else:
+        top = top_start
+        scale = max(0.6, (available_total - header_height) / ideal_rows_height) if ideal_rows_height > 0 else 1.0
+        chip_h = max(26, int(chip_h_ideal * scale))
+        chip_gap_s = max(6, int(chip_gap * scale))
+        if scale < 1.0:
+            font_label = _load_font(_FONT_TITLE_PATHS, max(10, int(font_label.size * scale)))
+            font_value = _load_font(_FONT_TEXT_PATHS, max(13, int(font_value.size * scale)))
+
+    y_rows = top + eyebrow_height + badge_size + 20 + len(intro_lines) * (font_intro.size + 7) + 14
+
     overlay = Image.new("RGBA", (w, h), (0, 0, 0, 0))
     odraw = ImageDraw.Draw(overlay)
-    yy = y
+    yy = y_rows
     for _ in rows:
-        odraw.rounded_rectangle((pad_x, yy, w - pad_x, yy + chip_h), radius=9, fill=CHIP_FILL)
+        odraw.rounded_rectangle((pad_x, yy, w - pad_x, yy + chip_h), radius=11, fill=CHIP_FILL)
         yy += chip_h + chip_gap_s
 
     composed = Image.alpha_composite(base, overlay)
     draw = ImageDraw.Draw(composed, "RGBA")
 
     if eyebrow:
-        draw.text((pad_x, int(h * 0.15)), eyebrow.upper(), font=font_eyebrow, fill=TEXT_EYEBROW)
+        draw.text((pad_x, top), eyebrow.upper(), font=font_eyebrow, fill=TEXT_EYEBROW)
 
-    y = top
-    draw.rounded_rectangle((pad_x, y, pad_x + badge_size, y + badge_size), radius=int(badge_size * 0.27), fill=accent_rgba)
-    cx, cy = pad_x + badge_size // 2, y + badge_size // 2
-    r = max(2, badge_size // 7)
+    yb = top + eyebrow_height
+    draw.rounded_rectangle((pad_x, yb, pad_x + badge_size, yb + badge_size), radius=int(badge_size * 0.27), fill=accent_rgba)
+    cx, cy = pad_x + badge_size // 2, yb + badge_size // 2
+    r = max(3, badge_size // 7)
     draw.ellipse((cx - 2 * r - 1, cy - r - 1, cx - 1, cy - 1), fill=(255, 255, 255, 255))
     draw.ellipse((cx + 1, cy + 1, cx + 2 * r + 1, cy + r + 1), fill=(255, 255, 255, 255))
-    draw.line((cx - 2 * r, cy - r, cx + 2 * r, cy + r), fill=accent_rgba, width=max(2, r))
+    draw.line((cx - 2 * r, cy - r, cx + 2 * r, cy + r), fill=accent_rgba, width=max(3, r))
+    draw.text((pad_x + badge_size + 14, yb + badge_size // 2 - font_title.size // 2 - 2), title, font=font_title, fill=TEXT_MAIN)
 
-    draw.text((pad_x + badge_size + 12, y + badge_size // 2 - font_title.size // 2 - 1), title, font=font_title, fill=TEXT_MAIN)
-    y += badge_size + 18
-
+    yt = yb + badge_size + 20
     for line in intro_lines:
-        draw.text((pad_x, y), line, font=font_intro, fill=TEXT_SUB)
-        y += font_intro.size + 6
-    y += 12
+        draw.text((pad_x, yt), line, font=font_intro, fill=TEXT_SUB)
+        yt += font_intro.size + 7
+    yt += 14
 
-    icon_r = max(7, int(chip_h * 0.25))
+    icon_r = max(9, int(chip_h * 0.26))
+    yy = y_rows
     for label, value in rows:
-        icon_cx = pad_x + 16
-        icon_cy = y + chip_h // 2
+        icon_cx = pad_x + 20
+        icon_cy = yy + chip_h // 2
         draw_row_icon(draw, icon_cx, icon_cy, icon_r, label, accent_rgba)
-        text_x = pad_x + 16 + icon_r + 13
-        draw.text((text_x, y + chip_h * 0.15), label, font=font_label, fill=TEXT_LABEL)
-        draw.text((text_x, y + chip_h * 0.47), value, font=font_value, fill=TEXT_MAIN)
-        y += chip_h + chip_gap_s
+        text_x = pad_x + 20 + icon_r + 16
+        draw.text((text_x, yy + chip_h * 0.14), label, font=font_label, fill=TEXT_LABEL)
+        draw.text((text_x, yy + chip_h * 0.46), value, font=font_value, fill=TEXT_MAIN)
+        yy += chip_h + chip_gap_s
 
     buf = io.BytesIO()
     composed.save(buf, format="PNG")
@@ -1237,7 +1246,9 @@ async def build_ticket_card_file(db, guild_id: str, title: str, intro: str, rows
     der Aufrufer soll dann auf Text (Components V2/Embed) zurückfallen."""
     url = get_setting_value(db, guild_id, "ticket_karte_grundplatte_url")
     if not url:
+        print(f"Ticket-Karte: keine Grundplatte-URL für Server {guild_id} gefunden (Setting 'ticket_karte_grundplatte_url' leer/nicht gesetzt).")
         return None
+    print(f"Ticket-Karte: Grundplatte gefunden, lade von {url}")
     base = await get_ticket_card_base(url)
     if base is None:
         return None
