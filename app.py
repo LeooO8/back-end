@@ -2404,4 +2404,3 @@ def update_module(module_key: str, payload: dict, guild_id: str, db: Session = D
     log(db, guild_id, "system", f"{MODULE_NAMES[module_key]} wurde {'aktiviert' if enabled else 'deaktiviert'}")
     db.commit()
     return {"ok": True, "module": module_key, "enabled": enabled}
-    
