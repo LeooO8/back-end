@@ -1137,15 +1137,48 @@ def draw_row_icon(draw: "ImageDraw.ImageDraw", cx: float, cy: float, r: float, l
         draw.ellipse((cx - r * 0.4, cy - r * 0.4, cx + r * 0.4, cy + r * 0.4), fill=color)
 
 
+def _ticket_card_layout(w: int, h: int, base_font_title_size: int, eyebrow: str, rows: list, intro: str, pad_x: int, title: str) -> dict:
+    """Berechnet alle Schriftgrößen/Maße für eine gegebene Basis-Titelgröße.
+    Schrumpft die Titelschrift automatisch, falls der Titel neben dem
+    Icon-Badge sonst über den rechten Rand hinausragen würde."""
+    font_title = _load_font(_FONT_TITLE_PATHS, base_font_title_size)
+    badge_size = int(font_title.size * 1.3)
+    max_title_w = w - pad_x * 2 - badge_size - 14
+    while font_title.size > 12 and font_title.getlength(title) > max_title_w:
+        font_title = _load_font(_FONT_TITLE_PATHS, font_title.size - 1)
+        badge_size = int(font_title.size * 1.3)
+        max_title_w = w - pad_x * 2 - badge_size - 14
+
+    font_label = _load_font(_FONT_TITLE_PATHS, max(10, int(font_title.size * 0.42)))
+    font_value = _load_font(_FONT_TEXT_PATHS, max(12, int(font_title.size * 0.55)))
+    font_intro = _load_font(_FONT_TEXT_PATHS, max(11, int(font_title.size * 0.5)))
+    font_eyebrow = _load_font(_FONT_TITLE_PATHS, max(10, int(font_title.size * 0.42)))
+    chip_gap = max(8, int(font_title.size * 0.28))
+    eyebrow_height = (font_eyebrow.size + 12) if eyebrow else 0
+
+    wrap_width = max(20, int((w - 2 * pad_x) / (font_intro.size * 0.52)))
+    intro_lines = textwrap.wrap(intro, width=wrap_width) if intro else []
+    header_height = eyebrow_height + badge_size + 20 + len(intro_lines) * (font_intro.size + 7) + 14
+    chip_h = int(badge_size * 1.15)
+    rows_height = len(rows) * (chip_h + chip_gap) - chip_gap if rows else 0
+
+    return dict(
+        font_title=font_title, font_label=font_label, font_value=font_value, font_intro=font_intro,
+        font_eyebrow=font_eyebrow, badge_size=badge_size, chip_gap=chip_gap, eyebrow_height=eyebrow_height,
+        intro_lines=intro_lines, header_height=header_height, chip_h=chip_h, rows_height=rows_height,
+        total=header_height + rows_height,
+    )
+
+
 def draw_ticket_card(base: "Image.Image", title: str, intro: str, rows: list[tuple[str, str]], accent: tuple = (114, 137, 218), eyebrow: str = None) -> io.BytesIO:
     """Zeichnet optional ein kleines Kategorie-Label, Titel, Icon-Badge,
     Einleitungstext und Info-'Chips' (mit kleinem gezeichnetem Icon, Label,
     Wert) direkt auf die Grundplatte. Gibt ein fertiges PNG als BytesIO
-    zurück. Orientiert sich an der Höhe der Grundplatte (nicht nur an der
-    Breite), damit der Inhalt bei größeren/höheren Vorlagen nicht winzig
-    wirkt. Ist der Inhalt kleiner als der verfügbare Platz, wird er dezent
-    Richtung Mitte gerückt statt oben zu kleben; ist zuwenig Platz, werden
-    die Zeilen automatisch verkleinert statt abgeschnitten zu werden."""
+    zurück. Die Schriftgröße wird aktiv an den verfügbaren Platz der
+    Grundplatte angepasst (nicht nur die Position!), damit der Inhalt bei
+    größeren/anders proportionierten Vorlagen weder winzig wirkt noch über
+    den Rand hinausläuft. Ist noch Platz übrig, wird der Inhalt dezent
+    Richtung Mitte gerückt statt oben zu kleben."""
     base = base.copy()
     w, h = base.size
     accent_rgba = (*accent, 255)
@@ -1156,41 +1189,31 @@ def draw_ticket_card(base: "Image.Image", title: str, intro: str, rows: list[tup
     TEXT_EYEBROW = (180, 182, 195, 255)
     CHIP_FILL = (255, 255, 255, 20)
 
-    ref = min(w, h * 1.8)  # verhindert Riesenschrift bei sehr breiten, flachen Bildern
-    font_title = _load_font(_FONT_TITLE_PATHS, max(22, int(ref / 15)))
-    font_label = _load_font(_FONT_TITLE_PATHS, max(12, int(ref / 34)))
-    font_value = _load_font(_FONT_TEXT_PATHS, max(15, int(ref / 26)))
-    font_intro = _load_font(_FONT_TEXT_PATHS, max(13, int(ref / 28)))
-    font_eyebrow = _load_font(_FONT_TITLE_PATHS, max(12, int(ref / 32)))
-
     pad_x = int(w * 0.055)
     top_start = int(h * 0.15)
-    eyebrow_height = (font_eyebrow.size + 12) if eyebrow else 0
     bottom_margin = int(h * 0.06)
-    badge_size = int(font_title.size * 1.3)
-    chip_gap = 12
-
-    wrap_width = max(20, int((w - 2 * pad_x) / (font_intro.size * 0.52)))
-    intro_lines = textwrap.wrap(intro, width=wrap_width) if intro else []
-    header_height = eyebrow_height + badge_size + 20 + len(intro_lines) * (font_intro.size + 7) + 14
-
-    chip_h_ideal = int(badge_size * 1.15)
-    ideal_rows_height = len(rows) * (chip_h_ideal + chip_gap) - chip_gap if rows else 0
-    total_content_height = header_height + ideal_rows_height
     available_total = h - top_start - bottom_margin
 
-    if total_content_height < available_total:
-        # Platz übrig -> Inhalt etwas Richtung Mitte rücken statt oben kleben zu lassen
-        top = top_start + (available_total - total_content_height) // 3
-        chip_h, chip_gap_s = chip_h_ideal, chip_gap
-    else:
-        top = top_start
-        scale = max(0.6, (available_total - header_height) / ideal_rows_height) if ideal_rows_height > 0 else 1.0
-        chip_h = max(26, int(chip_h_ideal * scale))
-        chip_gap_s = max(6, int(chip_gap * scale))
-        if scale < 1.0:
-            font_label = _load_font(_FONT_TITLE_PATHS, max(10, int(font_label.size * scale)))
-            font_value = _load_font(_FONT_TEXT_PATHS, max(13, int(font_value.size * scale)))
+    # Iterativ die Basisgröße finden, die den verfügbaren Platz gut ausfüllt
+    # (ca. 78%, damit es nicht randvoll/gequetscht wirkt), aber nie überläuft.
+    base_size = max(20, w // 18)
+    L = _ticket_card_layout(w, h, base_size, eyebrow, rows, intro, pad_x, title)
+    if L["total"] > 0:
+        target_scale = max(0.55, min(2.2, (available_total / L["total"]) * 0.78))
+        base_size = max(16, int(base_size * target_scale))
+        L = _ticket_card_layout(w, h, base_size, eyebrow, rows, intro, pad_x, title)
+        if L["total"] > available_total:
+            shrink = available_total / L["total"]
+            base_size = max(14, int(base_size * shrink))
+            L = _ticket_card_layout(w, h, base_size, eyebrow, rows, intro, pad_x, title)
+
+    top = top_start + max(0, (available_total - L["total"]) // 2)
+    font_title, font_label, font_value, font_intro, font_eyebrow = (
+        L["font_title"], L["font_label"], L["font_value"], L["font_intro"], L["font_eyebrow"]
+    )
+    badge_size, chip_gap, eyebrow_height, intro_lines, chip_h = (
+        L["badge_size"], L["chip_gap"], L["eyebrow_height"], L["intro_lines"], L["chip_h"]
+    )
 
     y_rows = top + eyebrow_height + badge_size + 20 + len(intro_lines) * (font_intro.size + 7) + 14
 
@@ -1199,7 +1222,7 @@ def draw_ticket_card(base: "Image.Image", title: str, intro: str, rows: list[tup
     yy = y_rows
     for _ in rows:
         odraw.rounded_rectangle((pad_x, yy, w - pad_x, yy + chip_h), radius=11, fill=CHIP_FILL)
-        yy += chip_h + chip_gap_s
+        yy += chip_h + chip_gap
 
     composed = Image.alpha_composite(base, overlay)
     draw = ImageDraw.Draw(composed, "RGBA")
@@ -1231,7 +1254,7 @@ def draw_ticket_card(base: "Image.Image", title: str, intro: str, rows: list[tup
         text_x = pad_x + 20 + icon_r + 16
         draw.text((text_x, yy + chip_h * 0.14), label, font=font_label, fill=TEXT_LABEL)
         draw.text((text_x, yy + chip_h * 0.46), value, font=font_value, fill=TEXT_MAIN)
-        yy += chip_h + chip_gap_s
+        yy += chip_h + chip_gap
 
     buf = io.BytesIO()
     composed.save(buf, format="PNG")
