@@ -1256,6 +1256,11 @@ def draw_ticket_card(base: "Image.Image", title: str, intro: str, rows: list[tup
         draw.text((text_x, yy + chip_h * 0.46), value, font=font_value, fill=TEXT_MAIN)
         yy += chip_h + chip_gap
 
+    # TEMPORÄRER DEBUG-MARKER - zeigt, ob wirklich diese Version läuft.
+    # Sobald das bestätigt ist, sag Bescheid und ich entferne die Zeile wieder.
+    debug_font = _load_font(_FONT_TEXT_PATHS, 11)
+    draw.text((w - 90, h - 16), "layout-v3", font=debug_font, fill=(255, 0, 0, 160))
+
     buf = io.BytesIO()
     composed.save(buf, format="PNG")
     buf.seek(0)
