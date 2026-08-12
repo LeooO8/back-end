@@ -1082,6 +1082,16 @@ async def duty_cmd(
 # ---------- Ticket-Karte (Bild statt Text-Box) ----------
 _TICKET_CARD_BASE_CACHE: dict[str, "Image.Image"] = {}
 
+# Viele Hosting-Umgebungen (z.B. schlanke Docker-Images auf Railway) haben
+# KEINE Schriftarten wie DejaVu installiert. ImageFont.truetype schlägt dann
+# fehl und Pillow fällt still auf eine winzige, nicht skalierbare Notfall-
+# schrift zurück - das sah aus wie "die Größe wirkt nicht", war aber ein
+# fehlendes Font-Problem. Fix: Schriftdateien liegen jetzt im Repo selbst
+# (Ordner 'fonts/'), kein Internet-Download nötig, funktioniert überall.
+_APP_DIR = os.path.dirname(os.path.abspath(__file__))
+_FONT_TITLE_PATHS = [os.path.join(_APP_DIR, "fonts", "DejaVuSans-Bold.ttf"), "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"]
+_FONT_TEXT_PATHS = [os.path.join(_APP_DIR, "fonts", "DejaVuSans.ttf"), "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"]
+
 
 def _load_font(paths: list, size: int) -> "ImageFont.FreeTypeFont":
     for p in paths:
@@ -1089,11 +1099,11 @@ def _load_font(paths: list, size: int) -> "ImageFont.FreeTypeFont":
             return ImageFont.truetype(p, size)
         except Exception:
             continue
-    return ImageFont.load_default()
-
-
-_FONT_TITLE_PATHS = ["/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"]
-_FONT_TEXT_PATHS = ["/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"]
+    # Letzter Ausweg: Pillows eingebaute Notfallschrift (skaliert seit Pillow 10.1)
+    try:
+        return ImageFont.load_default(size=size)
+    except TypeError:
+        return ImageFont.load_default()
 
 
 async def get_ticket_card_base(url: str) -> "Image.Image | None":
@@ -1255,11 +1265,6 @@ def draw_ticket_card(base: "Image.Image", title: str, intro: str, rows: list[tup
         draw.text((text_x, yy + chip_h * 0.14), label, font=font_label, fill=TEXT_LABEL)
         draw.text((text_x, yy + chip_h * 0.46), value, font=font_value, fill=TEXT_MAIN)
         yy += chip_h + chip_gap
-
-    # TEMPORÄRER DEBUG-MARKER - zeigt, ob wirklich diese Version läuft.
-    # Sobald das bestätigt ist, sag Bescheid und ich entferne die Zeile wieder.
-    debug_font = _load_font(_FONT_TEXT_PATHS, 11)
-    draw.text((w - 90, h - 16), "layout-v3", font=debug_font, fill=(255, 0, 0, 160))
 
     buf = io.BytesIO()
     composed.save(buf, format="PNG")
