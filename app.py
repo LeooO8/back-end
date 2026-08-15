@@ -2176,7 +2176,7 @@ def get_tickets(guild_id: str, db: Session = Depends(get_db)):
         {
             "id": t.id, "case_id": t.case_id, "user_id": t.user_id, "username": t.username,
             "subject": t.subject, "category": t.category,
-            "status": t.status, "channel_id": t.channel_id,
+            "status": t.status, "channel_id": t.channel_id, "claimed_by": t.claimed_by,
             "created_at": t.created_at.isoformat() if t.created_at else None,
             "closed_at": t.closed_at.isoformat() if t.closed_at else None,
             "closed_by": t.closed_by,
@@ -2511,8 +2511,24 @@ def get_settings(guild_id: str, db: Session = Depends(get_db)):
     return {s.key[len(prefix):]: s.value for s in rows}
 
 
+OWNER_ONLY_SETTINGS = {
+    "ticket_panel_titel", "ticket_panel_text", "ticket_panel_bild_url",
+    "ticket_kategorien", "ticket_karte_grundplatte_url",
+}
+
+
+@app.get("/api/my-role")
+def my_role(guild_id: str, db: Session = Depends(get_db), user=Depends(require_guild_access)):
+    me = db.query(User).filter(User.id == ukey(guild_id, user["sub"])).first()
+    return {"role": me.role if me else "Mitglied"}
+
+
 @app.post("/api/settings")
 def update_settings(guild_id: str, payload: dict, db: Session = Depends(get_db), user=Depends(require_guild_access)):
+    if any(k in OWNER_ONLY_SETTINGS for k in payload.keys()):
+        me = db.query(User).filter(User.id == ukey(guild_id, user["sub"])).first()
+        if not me or me.role != "Owner":
+            raise HTTPException(403, "Nur der Server-Owner darf die Ticket-Panel-Einstellungen ändern.")
     for key, value in payload.items():
         full_key = gkey(guild_id, key)
         setting = db.query(Setting).get(full_key)
