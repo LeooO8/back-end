@@ -122,6 +122,7 @@ class Ticket(Base):
     closed_at = Column(DateTime, nullable=True)
     closed_by = Column(String, nullable=True)      # Username, der das Ticket geschlossen hat
     claimed_by = Column(String, nullable=True)      # Username des Team-Mitglieds, das sich zuständig gemeldet hat
+    feedback_rating = Column(Integer, nullable=True)  # 1-5 Sterne, vom Ersteller nach dem Schließen abgegeben
 
 
 class Todo(Base):
