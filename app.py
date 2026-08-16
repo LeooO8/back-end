@@ -1401,6 +1401,59 @@ if COMPONENTS_V2:
             self.add_item(TicketClosedContainerV2(ticket, closed_by))
 
 
+async def build_transcript(channel: discord.TextChannel, ticket: Ticket) -> "discord.File | None":
+    """Liest die letzten Nachrichten des Ticket-Kanals aus und baut daraus eine
+    einfache Text-Datei (Transkript) - damit der Gesprächsverlauf nicht
+    komplett verloren geht, wenn der Kanal gleich gelöscht wird."""
+    try:
+        lines = [
+            f"Transkript — Ticket {ticket.case_id or ticket.id}",
+            f"Nutzer: {ticket.username}",
+            f"Kategorie: {ticket.category or '—'}",
+            f"Erstellt: {ticket.created_at.strftime('%d.%m.%Y %H:%M') if ticket.created_at else '—'}",
+            f"Geschlossen: {datetime.now(timezone.utc).strftime('%d.%m.%Y %H:%M')}",
+            "=" * 50, "",
+        ]
+        messages = [msg async for msg in channel.history(limit=500, oldest_first=True)]
+        for msg in messages:
+            zeit = msg.created_at.strftime("%d.%m.%Y %H:%M")
+            text = msg.content or "[kein Text - z.B. Embed/Anhang/Komponente]"
+            lines.append(f"[{zeit}] {msg.author.display_name}: {text}")
+        buf = io.BytesIO("\n".join(lines).encode("utf-8"))
+        return discord.File(buf, filename=f"transkript-{ticket.case_id or ticket.id}.txt")
+    except Exception as e:
+        print(f"Transkript konnte nicht erstellt werden: {e}")
+        return None
+
+
+class TicketFeedbackView(discord.ui.View):
+    """Wird dem Ticket-Ersteller per DM geschickt - fragt eine 1-5-Sterne-Bewertung ab."""
+    def __init__(self, ticket_id: int):
+        super().__init__(timeout=60 * 60 * 24)  # 24h Zeit zum Bewerten
+        self.ticket_id = ticket_id
+        for i in range(1, 6):
+            self.add_item(TicketFeedbackButton(ticket_id, i))
+
+
+class TicketFeedbackButton(discord.ui.Button):
+    def __init__(self, ticket_id: int, stars: int):
+        super().__init__(label="⭐" * stars, style=discord.ButtonStyle.secondary, custom_id=f"ticket_feedback:{ticket_id}:{stars}")
+        self.ticket_id = ticket_id
+        self.stars = stars
+
+    async def callback(self, interaction: discord.Interaction):
+        db = SessionLocal()
+        try:
+            ticket = db.query(Ticket).get(self.ticket_id)
+            if ticket:
+                ticket.feedback_rating = self.stars
+                log(db, ticket.guild_id, "system", f"{ticket.username} bewertete Ticket #{ticket.case_id or ticket.id} mit {self.stars}⭐")
+                db.commit()
+        finally:
+            db.close()
+        await interaction.response.edit_message(content=f"Danke für dein Feedback! {'⭐' * self.stars}", view=None)
+
+
 async def close_ticket(interaction: discord.Interaction, ticket_id: int, closed_by: str):
     db = SessionLocal()
     try:
@@ -1438,6 +1491,29 @@ async def close_ticket(interaction: discord.Interaction, ticket_id: int, closed_
 
         channel = interaction.guild.get_channel(int(ticket.channel_id)) if ticket.channel_id else None
         if channel:
+            # Transkript erstellen und in den Log-Kanal posten (falls einer eingestellt ist)
+            transcript = await build_transcript(channel, ticket)
+            log_channel_id = get_setting_value(db, ticket.guild_id, "log_kanal")
+            if transcript and log_channel_id:
+                try:
+                    log_channel = interaction.guild.get_channel(int(log_channel_id))
+                    if log_channel:
+                        await log_channel.send(content=f"📄 Transkript für Ticket {ticket.case_id or ticket.id} ({ticket.username})", file=transcript)
+                except Exception as e:
+                    print(f"Transkript konnte nicht in den Log-Kanal gepostet werden: {e}")
+
+            # Ersteller per DM um eine kurze Bewertung bitten
+            try:
+                creator = interaction.guild.get_member(int(ticket.user_id))
+                if creator:
+                    await creator.send(
+                        f"Dein Ticket {ticket.case_id or ticket.id} auf **{interaction.guild.name}** wurde geschlossen. "
+                        f"Wie zufrieden warst du mit dem Support?",
+                        view=TicketFeedbackView(ticket.id),
+                    )
+            except Exception as e:
+                print(f"Feedback-Anfrage konnte nicht per DM gesendet werden (evtl. DMs deaktiviert): {e}")
+
             await asyncio.sleep(5)
             try:
                 await channel.delete(reason=f"Ticket geschlossen von {closed_by}")
@@ -2177,6 +2253,7 @@ def get_tickets(guild_id: str, db: Session = Depends(get_db)):
             "id": t.id, "case_id": t.case_id, "user_id": t.user_id, "username": t.username,
             "subject": t.subject, "category": t.category,
             "status": t.status, "channel_id": t.channel_id, "claimed_by": t.claimed_by,
+            "feedback_rating": t.feedback_rating,
             "created_at": t.created_at.isoformat() if t.created_at else None,
             "closed_at": t.closed_at.isoformat() if t.closed_at else None,
             "closed_by": t.closed_by,
