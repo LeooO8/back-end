@@ -2504,17 +2504,22 @@ def security_overview(guild_id: str, db: Session = Depends(get_db)):
 
 
 # ---------- Einstellungen ----------
-@app.get("/api/settings")
-def get_settings(guild_id: str, db: Session = Depends(get_db)):
-    prefix = f"{guild_id}:"
-    rows = db.query(Setting).filter(Setting.key.like(f"{prefix}%")).all()
-    return {s.key[len(prefix):]: s.value for s in rows}
-
-
 OWNER_ONLY_SETTINGS = {
     "ticket_panel_titel", "ticket_panel_text", "ticket_panel_bild_url",
     "ticket_kategorien", "ticket_karte_grundplatte_url",
 }
+
+
+@app.get("/api/settings")
+def get_settings(guild_id: str, db: Session = Depends(get_db), user=Depends(require_user)):
+    prefix = f"{guild_id}:"
+    rows = db.query(Setting).filter(Setting.key.like(f"{prefix}%")).all()
+    result = {s.key[len(prefix):]: s.value for s in rows}
+    me = db.query(User).filter(User.id == ukey(guild_id, user["sub"])).first()
+    if not me or me.role != "Owner":
+        for k in OWNER_ONLY_SETTINGS:
+            result.pop(k, None)
+    return result
 
 
 @app.get("/api/my-role")
