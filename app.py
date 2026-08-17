@@ -532,7 +532,10 @@ async def on_raw_reaction_remove(payload: discord.RawReactionActionEvent):
         db.close()
 
 
-@bot.tree.command(name="giveaway_erstellen", description="[Admin] Startet ein Giveaway")
+giveaway_group = app_commands.Group(name="giveaway", description="Giveaway-Verwaltung")
+
+
+@giveaway_group.command(name="erstellen", description="[Admin] Startet ein Giveaway")
 @app_commands.describe(preis="Was verlost wird", dauer_minuten="Wie lange das Giveaway läuft (in Minuten)")
 @app_commands.checks.has_permissions(administrator=True)
 async def giveaway_create_cmd(interaction: discord.Interaction, preis: str, dauer_minuten: int):
@@ -573,7 +576,7 @@ async def giveaway_create_cmd(interaction: discord.Interaction, preis: str, daue
         db.close()
 
 
-@bot.tree.command(name="giveaway_beenden", description="[Admin] Beendet ein Giveaway sofort und lost aus")
+@giveaway_group.command(name="beenden", description="[Admin] Beendet ein Giveaway sofort und lost aus")
 @app_commands.describe(giveaway_id="Die ID des Giveaways (siehe Dashboard)")
 @app_commands.checks.has_permissions(administrator=True)
 async def giveaway_end_cmd(interaction: discord.Interaction, giveaway_id: int):
@@ -590,7 +593,7 @@ async def giveaway_end_cmd(interaction: discord.Interaction, giveaway_id: int):
         db.close()
 
 
-@bot.tree.command(name="giveaway_neu_auslosen", description="[Admin] Lost einen neuen Gewinner für ein beendetes Giveaway aus")
+@giveaway_group.command(name="auslosen", description="[Admin] Lost einen neuen Gewinner für ein beendetes Giveaway aus")
 @app_commands.describe(giveaway_id="Die ID des Giveaways (siehe Dashboard)")
 @app_commands.checks.has_permissions(administrator=True)
 async def giveaway_reroll_cmd(interaction: discord.Interaction, giveaway_id: int):
@@ -605,6 +608,9 @@ async def giveaway_reroll_cmd(interaction: discord.Interaction, giveaway_id: int
         await interaction.response.send_message(f"🔁 Neuer Gewinner für **{g.prize}** wurde ausgelost.")
     finally:
         db.close()
+
+
+bot.tree.add_command(giveaway_group)
 
 
 @giveaway_create_cmd.error
@@ -919,7 +925,10 @@ async def daily_cmd(interaction: discord.Interaction):
         db.close()
 
 
-@bot.tree.command(name="geld_geben", description="[Admin] Gibt einem Mitglied Guthaben")
+geld_group = app_commands.Group(name="geld", description="[Admin] Guthaben-Verwaltung")
+
+
+@geld_group.command(name="geben", description="[Admin] Gibt einem Mitglied Guthaben")
 @app_commands.describe(mitglied="Wer das Guthaben bekommt", betrag="Wie viel Guthaben")
 @app_commands.checks.has_permissions(administrator=True)
 async def give_money_cmd(interaction: discord.Interaction, mitglied: discord.Member, betrag: int):
@@ -939,7 +948,7 @@ async def give_money_cmd(interaction: discord.Interaction, mitglied: discord.Mem
         db.close()
 
 
-@bot.tree.command(name="geld_abziehen", description="[Admin] Zieht einem Mitglied Guthaben ab")
+@geld_group.command(name="abziehen", description="[Admin] Zieht einem Mitglied Guthaben ab")
 @app_commands.describe(mitglied="Wem Guthaben abgezogen wird", betrag="Wie viel Guthaben")
 @app_commands.checks.has_permissions(administrator=True)
 async def remove_money_cmd(interaction: discord.Interaction, mitglied: discord.Member, betrag: int):
@@ -959,7 +968,7 @@ async def remove_money_cmd(interaction: discord.Interaction, mitglied: discord.M
         db.close()
 
 
-@bot.tree.command(name="kontostand_ansehen", description="[Admin] Zeigt den Kontostand eines Mitglieds")
+@geld_group.command(name="ansehen", description="[Admin] Zeigt den Kontostand eines Mitglieds")
 @app_commands.describe(mitglied="Wessen Kontostand angezeigt werden soll")
 @app_commands.checks.has_permissions(administrator=True)
 async def view_balance_cmd(interaction: discord.Interaction, mitglied: discord.Member):
@@ -974,6 +983,9 @@ async def view_balance_cmd(interaction: discord.Interaction, mitglied: discord.M
         )
     finally:
         db.close()
+
+
+bot.tree.add_command(geld_group)
 
 
 @give_money_cmd.error
@@ -1635,7 +1647,10 @@ if COMPONENTS_V2:
             self.add_item(TicketPanelContainerV2(titel, text, categories))
 
 
-@bot.tree.command(name="ticket_panel", description="[Admin] Postet ein Ticket-Panel mit Kategorie-Auswahl in diesen Kanal")
+ticket_group = app_commands.Group(name="ticket", description="Ticket-System")
+
+
+@ticket_group.command(name="panel", description="[Admin] Postet ein Ticket-Panel mit Kategorie-Auswahl in diesen Kanal")
 @app_commands.checks.has_permissions(administrator=True)
 async def ticket_panel_cmd(interaction: discord.Interaction):
     db = SessionLocal()
@@ -1663,13 +1678,13 @@ async def ticket_panel_cmd(interaction: discord.Interaction):
         await interaction.response.send_message(embed=embed, view=TicketPanelView(kategorien))
 
 
-@bot.tree.command(name="ticket", description="Öffnet ein neues Support-Ticket")
+@ticket_group.command(name="erstellen", description="Öffnet ein neues Support-Ticket")
 @app_commands.describe(grund="Worum geht es? (kurz)")
 async def ticket_cmd(interaction: discord.Interaction, grund: str = "Kein Grund angegeben"):
     await create_ticket_channel(interaction, grund)
 
 
-@bot.tree.command(name="ticket_schliessen", description="Schließt das aktuelle Ticket (nur im Ticket-Kanal nutzbar)")
+@ticket_group.command(name="schliessen", description="Schließt das aktuelle Ticket (nur im Ticket-Kanal nutzbar)")
 async def ticket_close_cmd(interaction: discord.Interaction):
     db = SessionLocal()
     try:
@@ -1679,6 +1694,9 @@ async def ticket_close_cmd(interaction: discord.Interaction):
     finally:
         db.close()
     await close_ticket(interaction, ticket.id, closed_by=interaction.user.display_name)
+
+
+bot.tree.add_command(ticket_group)
 
 
 async def send_announcement(guild: discord.Guild, guild_id: str, titel: str, nachricht: str, rolle: "discord.Role | None" = None) -> discord.TextChannel:
