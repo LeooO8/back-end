@@ -1136,6 +1136,21 @@ async def get_ticket_card_base(url: str) -> "Image.Image | None":
         return None
 
 
+async def get_avatar_image(url: str) -> "Image.Image | None":
+    """Lädt das Profilbild eines Nutzers für die Ticket-Karte. Wird nicht
+    dauerhaft gecacht (anders als die Grundplatte), da sich Profilbilder
+    ändern können und die URL selbst schon einen Hash enthält."""
+    try:
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"}
+        async with httpx.AsyncClient(timeout=8, headers=headers, follow_redirects=True) as client:
+            resp = await client.get(url)
+            resp.raise_for_status()
+        return Image.open(io.BytesIO(resp.content)).convert("RGBA")
+    except Exception as e:
+        print(f"Konnte Profilbild nicht laden ({url}): {e}")
+        return None
+
+
 def draw_row_icon(draw: "ImageDraw.ImageDraw", cx: float, cy: float, r: float, label: str, color: tuple):
     """Zeichnet ein kleines, zum Zeileninhalt passendes Icon (Uhr, Person, Tag,
     Kategorie-Raute) frei mit einfachen Formen - kein Emoji-Font nötig, läuft
@@ -1155,6 +1170,9 @@ def draw_row_icon(draw: "ImageDraw.ImageDraw", cx: float, cy: float, r: float, l
     elif "kategorie" in l:
         draw.polygon([(cx - r, cy), (cx, cy - r), (cx + r, cy), (cx, cy + r)], outline=color, width=2)
         draw.ellipse((cx - r * 0.15, cy - r * 0.15, cx + r * 0.15, cy + r * 0.15), fill=color)
+    elif "grund" in l or "anliegen" in l:
+        draw.rounded_rectangle((cx - r, cy - r * 0.75, cx + r, cy + r * 0.55), radius=r * 0.4, outline=color, width=2)
+        draw.line((cx - r * 0.5, cy - r * 0.75 + r * 1.3, cx - r * 0.15, cy + r), fill=color, width=2)
     else:
         draw.ellipse((cx - r * 0.4, cy - r * 0.4, cx + r * 0.4, cy + r * 0.4), fill=color)
 
@@ -1192,15 +1210,16 @@ def _ticket_card_layout(w: int, h: int, base_font_title_size: int, eyebrow: str,
     )
 
 
-def draw_ticket_card(base: "Image.Image", title: str, intro: str, rows: list[tuple[str, str]], accent: tuple = (114, 137, 218), eyebrow: str = None) -> io.BytesIO:
-    """Zeichnet optional ein kleines Kategorie-Label, Titel, Icon-Badge,
-    Einleitungstext und Info-'Chips' (mit kleinem gezeichnetem Icon, Label,
-    Wert) direkt auf die Grundplatte. Gibt ein fertiges PNG als BytesIO
-    zurück. Die Schriftgröße wird aktiv an den verfügbaren Platz der
-    Grundplatte angepasst (nicht nur die Position!), damit der Inhalt bei
-    größeren/anders proportionierten Vorlagen weder winzig wirkt noch über
-    den Rand hinausläuft. Ist noch Platz übrig, wird der Inhalt dezent
-    Richtung Mitte gerückt statt oben zu kleben."""
+def draw_ticket_card(base: "Image.Image", title: str, intro: str, rows: list[tuple[str, str]], accent: tuple = (114, 137, 218), eyebrow: str = None, avatar: "Image.Image | None" = None) -> io.BytesIO:
+    """Zeichnet optional ein kleines Kategorie-Label, Titel, Icon-Badge (oder
+    das Profilbild des Ticket-Erstellers, falls übergeben), Einleitungstext
+    und Info-'Chips' (mit kleinem gezeichnetem Icon, Label, Wert) direkt auf
+    die Grundplatte. Gibt ein fertiges PNG als BytesIO zurück. Die
+    Schriftgröße wird aktiv an den verfügbaren Platz der Grundplatte
+    angepasst (nicht nur die Position!), damit der Inhalt bei größeren/
+    anders proportionierten Vorlagen weder winzig wirkt noch über den Rand
+    hinausläuft. Ist noch Platz übrig, wird der Inhalt dezent Richtung
+    Mitte gerückt statt oben zu kleben."""
     base = base.copy()
     w, h = base.size
     accent_rgba = (*accent, 255)
@@ -1253,12 +1272,20 @@ def draw_ticket_card(base: "Image.Image", title: str, intro: str, rows: list[tup
         draw.text((pad_x, top), eyebrow.upper(), font=font_eyebrow, fill=TEXT_EYEBROW)
 
     yb = top + eyebrow_height
-    draw.rounded_rectangle((pad_x, yb, pad_x + badge_size, yb + badge_size), radius=int(badge_size * 0.27), fill=accent_rgba)
-    cx, cy = pad_x + badge_size // 2, yb + badge_size // 2
-    r = max(3, badge_size // 7)
-    draw.ellipse((cx - 2 * r - 1, cy - r - 1, cx - 1, cy - 1), fill=(255, 255, 255, 255))
-    draw.ellipse((cx + 1, cy + 1, cx + 2 * r + 1, cy + r + 1), fill=(255, 255, 255, 255))
-    draw.line((cx - 2 * r, cy - r, cx + 2 * r, cy + r), fill=accent_rgba, width=max(3, r))
+    if avatar:
+        av = avatar.resize((badge_size, badge_size), Image.LANCZOS).convert("RGBA")
+        mask = Image.new("L", (badge_size, badge_size), 0)
+        mdraw = ImageDraw.Draw(mask)
+        mdraw.rounded_rectangle((0, 0, badge_size, badge_size), radius=int(badge_size * 0.27), fill=255)
+        composed.paste(av, (pad_x, yb), mask)
+        draw.rounded_rectangle((pad_x, yb, pad_x + badge_size, yb + badge_size), radius=int(badge_size * 0.27), outline=accent_rgba, width=2)
+    else:
+        draw.rounded_rectangle((pad_x, yb, pad_x + badge_size, yb + badge_size), radius=int(badge_size * 0.27), fill=accent_rgba)
+        cx, cy = pad_x + badge_size // 2, yb + badge_size // 2
+        r = max(3, badge_size // 7)
+        draw.ellipse((cx - 2 * r - 1, cy - r - 1, cx - 1, cy - 1), fill=(255, 255, 255, 255))
+        draw.ellipse((cx + 1, cy + 1, cx + 2 * r + 1, cy + r + 1), fill=(255, 255, 255, 255))
+        draw.line((cx - 2 * r, cy - r, cx + 2 * r, cy + r), fill=accent_rgba, width=max(3, r))
     draw.text((pad_x + badge_size + 14, yb + badge_size // 2 - font_title.size // 2 - 2), title, font=font_title, fill=TEXT_MAIN)
 
     yt = yb + badge_size + 20
@@ -1284,7 +1311,7 @@ def draw_ticket_card(base: "Image.Image", title: str, intro: str, rows: list[tup
     return buf
 
 
-async def build_ticket_card_file(db, guild_id: str, title: str, intro: str, rows: list[tuple[str, str]], accent: tuple = (114, 137, 218), eyebrow: str = None) -> "discord.File | None":
+async def build_ticket_card_file(db, guild_id: str, title: str, intro: str, rows: list[tuple[str, str]], accent: tuple = (114, 137, 218), eyebrow: str = None, avatar_url: str = None) -> "discord.File | None":
     """Baut die fertige Ticket-Karte als discord.File, falls eine Grundplatte
     hinterlegt ist (Setting 'ticket_karte_grundplatte_url'). Gibt None zurück,
     wenn keine Grundplatte gesetzt ist oder das Laden/Zeichnen fehlschlägt -
@@ -1297,8 +1324,9 @@ async def build_ticket_card_file(db, guild_id: str, title: str, intro: str, rows
     base = await get_ticket_card_base(url)
     if base is None:
         return None
+    avatar_img = await get_avatar_image(avatar_url) if avatar_url else None
     try:
-        buf = draw_ticket_card(base, title, intro, rows, accent=accent, eyebrow=eyebrow)
+        buf = draw_ticket_card(base, title, intro, rows, accent=accent, eyebrow=eyebrow, avatar=avatar_img)
         return discord.File(buf, filename="ticket.png")
     except Exception as e:
         print(f"Konnte Ticket-Karte nicht zeichnen: {e}")
@@ -1336,6 +1364,11 @@ async def claim_ticket(interaction: discord.Interaction, ticket_id: int):
         ticket = db.query(Ticket).get(ticket_id)
         if not ticket or ticket.status == "geschlossen":
             return await interaction.response.send_message("Dieses Ticket ist nicht mehr offen.", ephemeral=True)
+        if str(interaction.user.id) == ticket.user_id:
+            return await interaction.response.send_message("Du kannst dein eigenes Ticket nicht übernehmen — das dürfen nur andere Team-Mitglieder.", ephemeral=True)
+        me = db.query(User).filter(User.id == ukey(ticket.guild_id, interaction.user.id)).first()
+        if not me or me.role not in TEAM_ROLES:
+            return await interaction.response.send_message("Nur Team-Mitglieder (Support/Moderator/Admin/Owner) dürfen Tickets übernehmen.", ephemeral=True)
         if ticket.claimed_by:
             return await interaction.response.send_message(f"Dieses Ticket wurde bereits von **{ticket.claimed_by}** übernommen.", ephemeral=True)
         ticket.claimed_by = interaction.user.display_name
@@ -1481,10 +1514,12 @@ async def close_ticket(interaction: discord.Interaction, ticket_id: int, closed_
         rows = [("CaseID", f"#{ticket.case_id or ticket.id}")]
         rows += [("Erstellt am", ticket.created_at.strftime("%d. %B %Y um %H:%M") if ticket.created_at else "—")]
         rows += [("Nutzer", ticket.username)]
+        creator_member = interaction.guild.get_member(int(ticket.user_id)) if ticket.user_id else None
         card_file = await build_ticket_card_file(
             db, ticket.guild_id, "Support-Fall abgeschlossen",
             f"@{ticket.username} braucht keine Hilfe mehr!",
             rows, accent=(237, 66, 69), eyebrow=ticket.category or "Support",
+            avatar_url=str(creator_member.display_avatar.url) if creator_member else None,
         )
 
         if card_file:
@@ -1585,11 +1620,14 @@ async def create_ticket_channel(interaction: discord.Interaction, grund: str, ka
         ping = f"{interaction.user.mention} {support_role.mention if support_role else ''}".strip()
 
         rows = [("CaseID", f"#{ticket.case_id}"), ("Erstellt am", ticket.created_at.strftime("%d. %B %Y um %H:%M"))]
+        if grund and grund != "Kein Grund angegeben":
+            rows.append(("Grund", grund))
         rows.append(("Nutzer", interaction.user.display_name))
         card_file = await build_ticket_card_file(
             db, guild_id, "Neues Support-Ticket",
             f"Hey {interaction.user.display_name}, danke für deine Anfrage! Ein Team-Mitglied meldet sich in Kürze.",
             rows, eyebrow=ticket.category or "Support",
+            avatar_url=str(interaction.user.display_avatar.url),
         )
 
         if card_file:
