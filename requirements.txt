@@ -6,3 +6,4 @@ pyjwt
 python-multipart
 discord.py
 Pillow
+python-dotenv
