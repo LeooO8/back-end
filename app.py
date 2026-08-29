@@ -12,7 +12,10 @@ Daten (Konten, Shop, Dienste, Giveaways, Einstellungen, Logs). Das
 Dashboard fragt dafür bei jeder Anfrage eine guild_id (Server-ID) mit.
 """
 import os
+from dotenv import load_dotenv
 import io
+
+load_dotenv()
 import time
 import asyncio
 import random
