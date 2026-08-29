@@ -40,7 +40,11 @@ from database import get_db, init_db, SessionLocal
 from models import User, Transaction, ShopItem, DutyFraction, Giveaway, LogEntry, Setting, LoginSession, Ticket, Todo
 
 # ---------- Konfiguration (kommt aus Umgebungsvariablen, siehe README) ----------
-DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
+try:
+    with open("token.txt", "r", encoding="utf-8") as f:
+        DISCORD_BOT_TOKEN = f.read().strip()
+except FileNotFoundError:
+    DISCORD_BOT_TOKEN = None
 CLIENT_ID = os.getenv("DISCORD_CLIENT_ID")
 CLIENT_SECRET = os.getenv("DISCORD_CLIENT_SECRET")
 REDIRECT_URI = os.getenv("DISCORD_REDIRECT_URI", "http://localhost:8000/auth/callback")
