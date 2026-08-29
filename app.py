@@ -2706,3 +2706,6 @@ def update_module(module_key: str, payload: dict, guild_id: str, db: Session = D
     log(db, guild_id, "system", f"{MODULE_NAMES[module_key]} wurde {'aktiviert' if enabled else 'deaktiviert'}")
     db.commit()
     return {"ok": True, "module": module_key, "enabled": enabled}
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("app:app", host="0.0.0.0", port=10000)  # Port an deine Panel-Einstellungen anpassen
