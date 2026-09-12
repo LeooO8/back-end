@@ -135,3 +135,36 @@ class Todo(Base):
     created_by = Column(String, nullable=False)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     done_at = Column(DateTime, nullable=True)
+
+
+class Meeting(Base):
+    __tablename__ = "meetings"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    guild_id = Column(String, nullable=True)
+    title = Column(String, nullable=False)
+    von = Column(String, nullable=True)             # Beginn, freier Text (z.B. "18.07.2026 16:00")
+    bis = Column(String, nullable=True)             # Ende, freier Text, optional
+    ort = Column(String, nullable=True)             # Ort/Kanal, optional
+    inhalt = Column(String, nullable=True)          # Worum geht's, optional
+    created_by = Column(String, nullable=False)
+    channel_id = Column(String, nullable=True)
+    message_id = Column(String, nullable=True)
+    accepted = Column(String, default="")           # Discord-IDs, kommagetrennt
+    declined = Column(String, default="")
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+
+class DailyStat(Base):
+    """Ein täglicher Schnappschuss wichtiger Kennzahlen pro Server - Grundlage
+    für die Trend-Linien im Dashboard. Läuft erst ab dem Tag los, an dem der
+    Bot das erste Mal einen Schnappschuss macht - es gibt keine rückwirkend
+    erfundenen Werte für die Vergangenheit."""
+    __tablename__ = "daily_stats"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    guild_id = Column(String, nullable=True)
+    date = Column(String, nullable=False)  # "YYYY-MM-DD"
+    member_count = Column(Integer, default=0)
+    message_count = Column(Integer, default=0)   # kumulativer Gesamtwert zum Zeitpunkt des Schnappschusses
+    total_balance = Column(BigInteger, default=0)
+    open_tickets = Column(Integer, default=0)
+    active_giveaways = Column(Integer, default=0)
