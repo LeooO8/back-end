@@ -37,15 +37,10 @@ from sqlalchemy.orm import Session
 from sqlalchemy import func
 
 from database import get_db, init_db, SessionLocal
-from models import User, Transaction, ShopItem, DutyFraction, Giveaway, LogEntry, Setting, LoginSession, Ticket, Todo
+from models import User, Transaction, ShopItem, DutyFraction, Giveaway, LogEntry, Setting, LoginSession, Ticket, Todo, Meeting, DailyStat
 
 # ---------- Konfiguration (kommt aus Umgebungsvariablen, siehe README) ----------
-import os
-
 DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
-
-if not DISCORD_BOT_TOKEN:
-    raise RuntimeError("DISCORD_BOT_TOKEN fehlt")
 CLIENT_ID = os.getenv("DISCORD_CLIENT_ID")
 CLIENT_SECRET = os.getenv("DISCORD_CLIENT_SECRET")
 REDIRECT_URI = os.getenv("DISCORD_REDIRECT_URI", "http://localhost:8000/auth/callback")
@@ -283,6 +278,8 @@ async def on_ready():
             apply_daily_interest.start()
         if not auto_end_duty.is_running():
             auto_end_duty.start()
+        if not snapshot_daily_stats.is_running():
+            snapshot_daily_stats.start()
     except Exception as e:
         print(f"Fehler beim Synchronisieren der Slash-Commands: {e}")
 
@@ -502,6 +499,35 @@ async def apply_daily_interest():
         db.close()
 
 
+@tasks.loop(hours=6)
+async def snapshot_daily_stats():
+    """Macht einmal pro Tag pro Server einen Schnappschuss der wichtigsten
+    Kennzahlen - das ist die Grundlage für die Trend-Linien im Dashboard.
+    Läuft alle 6 Stunden, legt aber pro Server nur einmal am Tag einen
+    neuen Eintrag an."""
+    if not bot.is_ready():
+        return
+    db = SessionLocal()
+    try:
+        today = datetime.now(timezone.utc).date().isoformat()
+        for guild in bot.guilds:
+            guild_id = str(guild.id)
+            existing = db.query(DailyStat).filter(DailyStat.guild_id == guild_id, DailyStat.date == today).first()
+            if existing:
+                continue
+            msg_count = int(get_setting_value(db, guild_id, "_gesamt_nachrichten", default="0") or "0")
+            open_tickets = db.query(func.count(Ticket.id)).filter(Ticket.guild_id == guild_id, Ticket.status == "offen").scalar() or 0
+            active_giveaways = db.query(func.count(Giveaway.id)).filter(Giveaway.guild_id == guild_id, Giveaway.status == "aktiv").scalar() or 0
+            snap = DailyStat(
+                guild_id=guild_id, date=today, member_count=guild.member_count, message_count=msg_count,
+                total_balance=compute_total_balance(db, guild_id, guild), open_tickets=open_tickets, active_giveaways=active_giveaways,
+            )
+            db.add(snap)
+            db.commit()
+    finally:
+        db.close()
+
+
 @bot.event
 async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
     if str(payload.emoji) != GIVEAWAY_EMOJI or payload.user_id == bot.user.id:
@@ -639,6 +665,15 @@ async def on_message(message: discord.Message):
 
     db = SessionLocal()
     try:
+        # Gesamt-Nachrichtenzähler hochzählen (Grundlage für die "Nachrichten"-Kachel im Dashboard)
+        counter_key = gkey(guild_id, "_gesamt_nachrichten")
+        counter = db.query(Setting).get(counter_key)
+        if counter:
+            counter.value = str(int(counter.value or "0") + 1)
+        else:
+            db.add(Setting(key=counter_key, value="1"))
+        db.commit()
+
         # Eigenes AFK entfernen, sobald man wieder schreibt
         me = db.query(User).get(ukey(guild_id, message.author.id))
         if me and me.afk_reason:
@@ -1745,6 +1780,108 @@ async def ticket_close_cmd(interaction: discord.Interaction):
 bot.tree.add_command(ticket_group)
 
 
+# ---------- Team-Meetings ----------
+def build_meeting_embed(m: Meeting) -> discord.Embed:
+    embed = discord.Embed(
+        title=f"📅 {m.title}", description=m.inhalt or "Es wurde eine neue Besprechung angesetzt.",
+        color=BRAND_COLOR, timestamp=datetime.now(timezone.utc),
+    )
+    if m.von:
+        embed.add_field(name="🕐 Vom", value=m.von, inline=True)
+    if m.bis:
+        embed.add_field(name="🕐 Bis", value=m.bis, inline=True)
+    if m.ort:
+        embed.add_field(name="📍 Ort", value=m.ort, inline=True)
+    acc = [i for i in (m.accepted or "").split(",") if i.strip()]
+    dec = [i for i in (m.declined or "").split(",") if i.strip()]
+    embed.add_field(name=f"✅ Zugesagt ({len(acc)})", value="\n".join(f"<@{i}>" for i in acc) or "—", inline=True)
+    embed.add_field(name=f"❌ Abgesagt ({len(dec)})", value="\n".join(f"<@{i}>" for i in dec) or "—", inline=True)
+    embed.set_footer(text=f"Angesetzt von {m.created_by}")
+    return embed
+
+
+class MeetingRSVPView(discord.ui.View):
+    def __init__(self, meeting_id: int):
+        super().__init__(timeout=None)
+        self.meeting_id = meeting_id
+
+    async def _set_rsvp(self, interaction: discord.Interaction, accepted: bool):
+        db = SessionLocal()
+        try:
+            m = db.query(Meeting).get(self.meeting_id)
+            if not m:
+                return await interaction.response.send_message("Dieses Meeting existiert nicht mehr.", ephemeral=True)
+            uid = str(interaction.user.id)
+            acc = [i for i in (m.accepted or "").split(",") if i.strip()]
+            dec = [i for i in (m.declined or "").split(",") if i.strip()]
+            if accepted:
+                if uid not in acc:
+                    acc.append(uid)
+                if uid in dec:
+                    dec.remove(uid)
+            else:
+                if uid not in dec:
+                    dec.append(uid)
+                if uid in acc:
+                    acc.remove(uid)
+            m.accepted, m.declined = ",".join(acc), ",".join(dec)
+            db.commit()
+            embed = build_meeting_embed(m)
+            apply_brand(embed, db, interaction.guild)
+            await interaction.response.edit_message(embed=embed, view=self)
+        finally:
+            db.close()
+
+    @discord.ui.button(label="Teilnehmen", style=discord.ButtonStyle.success, emoji="✅")
+    async def accept(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._set_rsvp(interaction, True)
+
+    @discord.ui.button(label="Absagen", style=discord.ButtonStyle.danger, emoji="❌")
+    async def decline(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._set_rsvp(interaction, False)
+
+
+meeting_group = app_commands.Group(name="meeting", description="Team-Meeting-Verwaltung")
+
+
+@meeting_group.command(name="erstellen", description="[Admin] Setzt ein Team-Meeting an")
+@app_commands.describe(
+    titel="Titel/Thema des Meetings", von="Wann es beginnt (z.B. 18.07.2026 16:00)",
+    bis="Wann es endet (optional)", ort="Ort/Kanal (optional)", inhalt="Worum geht's? (optional)",
+)
+@app_commands.checks.has_permissions(administrator=True)
+async def meeting_create_cmd(interaction: discord.Interaction, titel: str, von: str, bis: str = "", ort: str = "", inhalt: str = ""):
+    db = SessionLocal()
+    try:
+        m = Meeting(
+            guild_id=str(interaction.guild_id), title=titel, von=von, bis=bis or None, ort=ort or None,
+            inhalt=inhalt or None, created_by=interaction.user.display_name, channel_id=str(interaction.channel_id),
+        )
+        db.add(m)
+        db.commit()
+
+        embed = build_meeting_embed(m)
+        apply_brand(embed, db, interaction.guild)
+        await interaction.response.send_message(embed=embed, view=MeetingRSVPView(m.id))
+        msg = await interaction.original_response()
+        m.message_id = str(msg.id)
+        log(db, str(interaction.guild_id), "system", f"{interaction.user.display_name} hat ein Team-Meeting angesetzt: {titel}")
+        db.commit()
+    finally:
+        db.close()
+
+
+bot.tree.add_command(meeting_group)
+
+
+@meeting_create_cmd.error
+async def meeting_cmd_error(interaction: discord.Interaction, error):
+    if isinstance(error, app_commands.MissingPermissions):
+        await interaction.response.send_message("❌ Dafür brauchst du Administrator-Rechte auf diesem Server.", ephemeral=True)
+    else:
+        await interaction.response.send_message("❌ Etwas ist schiefgelaufen.", ephemeral=True)
+
+
 async def send_announcement(guild: discord.Guild, guild_id: str, titel: str, nachricht: str, rolle: "discord.Role | None" = None) -> discord.TextChannel:
     """Baut das Ankündigungs-Embed und postet es in den eingestellten Kanal.
     Wirft ValueError, falls kein Kanal konfiguriert oder gefunden wurde."""
@@ -2007,13 +2144,66 @@ def overview(guild_id: str, db: Session = Depends(get_db)):
     total_balance = compute_total_balance(db, guild_id, guild)
     member_count = guild.member_count if guild else (db.query(func.count(User.id)).filter(User.guild_id == guild_id).scalar() or 0)
     on_duty = db.query(func.sum(DutyFraction.on_duty)).filter(DutyFraction.guild_id == guild_id).scalar() or 0
-    recent = db.query(LogEntry).filter(LogEntry.guild_id == guild_id).order_by(LogEntry.created_at.desc()).limit(5).all()
+    recent = db.query(LogEntry).filter(LogEntry.guild_id == guild_id).order_by(LogEntry.created_at.desc()).limit(6).all()
     uptime_seconds = (datetime.now(timezone.utc) - BOT_START_TIME).total_seconds()
+
+    message_total = int(get_setting_value(db, guild_id, "_gesamt_nachrichten", default="0") or "0")
+    open_tickets = db.query(func.count(Ticket.id)).filter(Ticket.guild_id == guild_id, Ticket.status == "offen").scalar() or 0
+    active_giveaways = db.query(func.count(Giveaway.id)).filter(Giveaway.guild_id == guild_id, Giveaway.status == "aktiv").scalar() or 0
+
+    # Verlauf der letzten 7 Tage für die Trend-Linien - kann anfangs leer/kurz
+    # sein, füllt sich aber Tag für Tag von selbst (siehe snapshot_daily_stats)
+    since = (datetime.now(timezone.utc).date() - timedelta(days=7)).isoformat()
+    history = db.query(DailyStat).filter(DailyStat.guild_id == guild_id, DailyStat.date >= since).order_by(DailyStat.date.asc()).all()
+    trends = {
+        "mitglieder": [h.member_count for h in history],
+        "nachrichten": [h.message_count for h in history],
+        "tickets": [h.open_tickets for h in history],
+        "giveaways": [h.active_giveaways for h in history],
+        "guthaben": [h.total_balance for h in history],
+    }
+
+    def delta(key, current):
+        if not history:
+            return None
+        oldest = getattr(history[0], key)
+        return current - oldest
+
+    # Guthaben-Aufteilung nach Herkunft, direkt aus dem echten Transaktionsverlauf berechnet
+    def sum_types(types):
+        return db.query(func.sum(Transaction.amount)).filter(Transaction.guild_id == guild_id, Transaction.type.in_(types)).scalar() or 0
+
+    bank_volumen = sum_types(["Einzahlung", "Auszahlung", "Überweisung"])
+    shop_umsatz = sum_types(["Kauf"])
+    dienst_lohn = sum_types(["Dienstlohn"])
+    sonstiges = sum_types(["Arbeit", "Daily", "Admin-Gutschrift", "Admin-Abzug", "Zinsen"])
+    balance_breakdown = {"bank": bank_volumen, "shop": shop_umsatz, "dienst": dienst_lohn, "sonstiges": sonstiges}
+
+    server_info = {
+        "name": guild.name if guild else None,
+        "id": guild_id,
+        "created_at": guild.created_at.isoformat() if guild else None,
+        "member_count": member_count,
+        "role_count": len(guild.roles) if guild else 0,
+        "icon_url": str(guild.icon.url) if guild and guild.icon else None,
+    }
+
     return {
         "bot_status": "online" if bot.is_ready() else "startet…",
         "member_count": member_count,
+        "member_delta_7d": delta("member_count", member_count),
         "on_duty": on_duty,
         "total_balance": total_balance,
+        "balance_delta_7d": delta("total_balance", total_balance),
+        "message_total": message_total,
+        "message_delta_7d": delta("message_count", message_total),
+        "open_tickets": open_tickets,
+        "open_tickets_delta_7d": delta("open_tickets", open_tickets),
+        "active_giveaways": active_giveaways,
+        "active_giveaways_delta_7d": delta("active_giveaways", active_giveaways),
+        "trends": trends,
+        "balance_breakdown": balance_breakdown,
+        "server_info": server_info,
         "uptime_seconds": uptime_seconds,
         "recent_logs": [{"id": l.id, "type": l.type, "text": l.text, "time": l.created_at.isoformat()} for l in recent],
     }
@@ -2467,6 +2657,30 @@ def team_members(guild_id: str, db: Session = Depends(get_db)):
     ]
 
 
+# ---------- Team-Meetings ----------
+@app.get("/api/meetings")
+def get_meetings(guild_id: str, db: Session = Depends(get_db)):
+    guild = bot.get_guild(int(guild_id)) if guild_id.isdigit() else None
+
+    def resolve(ids):
+        result = []
+        for i in ids:
+            member = guild.get_member(int(i)) if guild else None
+            result.append({"id": i, "name": member.display_name if member else i})
+        return result
+
+    meetings = db.query(Meeting).filter(Meeting.guild_id == guild_id).order_by(Meeting.created_at.desc()).all()
+    return [
+        {
+            "id": m.id, "title": m.title, "von": m.von, "bis": m.bis, "ort": m.ort, "inhalt": m.inhalt,
+            "created_by": m.created_by, "created_at": m.created_at.isoformat() if m.created_at else None,
+            "accepted": resolve([i for i in (m.accepted or "").split(",") if i.strip()]),
+            "declined": resolve([i for i in (m.declined or "").split(",") if i.strip()]),
+        }
+        for m in meetings
+    ]
+
+
 # ---------- To-Do-Liste ----------
 @app.get("/api/todos")
 def get_todos(guild_id: str, db: Session = Depends(get_db)):
@@ -2714,7 +2928,6 @@ def update_module(module_key: str, payload: dict, guild_id: str, db: Session = D
     log(db, guild_id, "system", f"{MODULE_NAMES[module_key]} wurde {'aktiviert' if enabled else 'deaktiviert'}")
     db.commit()
     return {"ok": True, "module": module_key, "enabled": enabled}
-if __name__ == "__main__":
+    if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("app:app", host="0.0.0.0", port=21747)
-# Port an deine Panel-Einstellungen anpassen
+    uvicorn.run("app:app", host="0.0.0.0", port=10000)  # Port an deine Panel-Einstellungen anpassen
