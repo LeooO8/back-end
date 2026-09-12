@@ -12,10 +12,7 @@ Daten (Konten, Shop, Dienste, Giveaways, Einstellungen, Logs). Das
 Dashboard fragt dafür bei jeder Anfrage eine guild_id (Server-ID) mit.
 """
 import os
-from dotenv import load_dotenv
 import io
-
-load_dotenv()
 import time
 import asyncio
 import random
@@ -2892,16 +2889,15 @@ def update_settings(guild_id: str, payload: dict, db: Session = Depends(get_db),
     for key, value in payload.items():
         full_key = gkey(guild_id, key)
         setting = db.query(Setting).get(full_key)
-
         if setting:
             setting.value = str(value)
         else:
             db.add(Setting(key=full_key, value=str(value)))
-
     db.commit()
     log(db, guild_id, "system", f"Einstellungen geändert: {', '.join(payload.keys())}")
-
+    db.commit()
     return {"ok": True}
+
 
 # ---------- Module ----------
 @app.get("/api/modules")
@@ -2914,15 +2910,9 @@ def get_modules(guild_id: str, db: Session = Depends(get_db)):
 
 
 @app.post("/api/modules/{module_key}")
-def update_module(
-    module_key: str,
-    payload: dict,
-    guild_id: str,
-    db: Session = Depends(get_db),
-    user=Depends(require_guild_access)
-):
+def update_module(module_key: str, payload: dict, guild_id: str, db: Session = Depends(get_db), user=Depends(require_guild_access)):
     """Schaltet ein einzelnes Modul für den Server an oder aus. Erwartet {"enabled": true/false}."""
-    if module_key not in MODULE_NAMES:
+   if module_key not in MODULE_NAMES:
         raise HTTPException(404, "Unbekanntes Modul.")
 
     enabled = bool(payload.get("enabled", True))
