@@ -744,7 +744,6 @@ async def on_message(message: discord.Message):
                 await message.channel.send(
                     f"🤖 **Dresden RP Support**\n\n{antwort}"
                 )
-
             else:
                 await message.channel.send(
                     "🤖 **Dresden RP Support**\n\n"
@@ -762,6 +761,33 @@ async def on_message(message: discord.Message):
 
     # Wichtig für normale Bot-Befehle
     await bot.process_commands(message)
+
+
+@bot.tree.command(name="afk", description="Setzt dich auf AFK, bis du wieder schreibst")
+@app_commands.describe(grund="Warum du AFK bist (optional)")
+async def afk_cmd(interaction: discord.Interaction, grund: str = "Kein Grund angegeben"):
+    db = SessionLocal()
+    try:
+        if not is_module_enabled(db, interaction.guild_id, "afk"):
+            return await module_disabled_reply(interaction, "afk")
+
+        user = get_or_create_user(db, interaction.user)
+        user.afk_reason = grund
+        user.afk_since = datetime.now(timezone.utc)
+
+        log(
+            db,
+            str(interaction.guild_id),
+            "afk",
+            f"{user.username} ist jetzt AFK: {grund}"
+        )
+
+        db.commit()
+
+        await interaction.response.send_message(
+            f"😴 {interaction.user.mention} ist jetzt AFK: {grund}"
+        )
+
     finally:
         db.close()
 
