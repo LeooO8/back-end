@@ -659,44 +659,109 @@ async def giveaway_cmd_error(interaction: discord.Interaction, error):
 async def on_message(message: discord.Message):
     if message.author.bot or not message.guild:
         return
+
     guild_id = str(message.guild.id)
 
     db = SessionLocal()
     try:
-        # Gesamt-Nachrichtenzähler hochzählen (Grundlage für die "Nachrichten"-Kachel im Dashboard)
+        # Gesamt-Nachrichtenzähler
         counter_key = gkey(guild_id, "_gesamt_nachrichten")
         counter = db.query(Setting).get(counter_key)
+
         if counter:
             counter.value = str(int(counter.value or "0") + 1)
         else:
             db.add(Setting(key=counter_key, value="1"))
+
         db.commit()
 
-        # Eigenes AFK entfernen, sobald man wieder schreibt
-        me = db.query(User).get(ukey(guild_id, message.author.id))
+        # Eigenes AFK entfernen
+        me = db.query(User).get(
+            ukey(guild_id, message.author.id)
+        )
+
         if me and me.afk_reason:
             me.afk_reason = None
             me.afk_since = None
-            log(db, guild_id, "afk", f"{me.username} ist nicht mehr AFK (automatisch erkannt)")
+
+            log(
+                db,
+                guild_id,
+                "afk",
+                f"{me.username} ist nicht mehr AFK (automatisch erkannt)"
+            )
+
             db.commit()
+
             try:
-                await message.channel.send(f"👋 Willkommen zurück, {message.author.mention}! Dein AFK-Status wurde entfernt.")
+                await message.channel.send(
+                    f"👋 Willkommen zurück, {message.author.mention}! "
+                    f"Dein AFK-Status wurde entfernt."
+                )
             except Exception:
                 pass
 
-        # Erwähnte Mitglieder, die AFK sind, melden
+        # Erwähnte AFK-Mitglieder melden
         for mentioned in message.mentions:
             if mentioned.bot or mentioned.id == message.author.id:
                 continue
-            target = db.query(User).get(ukey(guild_id, mentioned.id))
+
+            target = db.query(User).get(
+                ukey(guild_id, mentioned.id)
+            )
+
             if target and target.afk_reason:
-                dauer = format_afk_duration(target.afk_since) if target.afk_since else ""
+                dauer = (
+                    format_afk_duration(target.afk_since)
+                    if target.afk_since
+                    else ""
+                )
+
                 try:
                     await message.channel.send(
-                        f"💤 {mentioned.display_name} ist gerade AFK ({dauer}): {target.afk_reason}"
+                        f"💤 {mentioned.display_name} ist gerade AFK "
+                        f"({dauer}): {target.afk_reason}"
                     )
                 except Exception:
                     pass
+
+        # =====================================================
+        # SUPPORT-BOT / WISSENSDATENBANK
+        # =====================================================
+
+        # Prüfen, ob die Nachricht in einem offenen Ticket ist
+        ticket = db.query(Ticket).filter(
+            Ticket.guild_id == guild_id,
+            Ticket.channel_id == str(message.channel.id),
+            Ticket.status == "offen"
+        ).first()
+
+        if ticket and message.content.strip():
+
+            antwort = suche_antwort(message.content)
+
+            if antwort:
+                await message.channel.send(
+                    f"🤖 **Dresden RP Support**\n\n{antwort}"
+                )
+
+            else:
+                await message.channel.send(
+                    "🤖 **Dresden RP Support**\n\n"
+                    "Diese Frage kann ich momentan nicht zuverlässig "
+                    "beantworten.\n\n"
+                    "👤 Ein Mitglied des Support-Teams wird sich um "
+                    "dein Anliegen kümmern."
+                )
+
+    except Exception as e:
+        print(f"Fehler im on_message-Event: {e}")
+
+    finally:
+        db.close()
+
+    # Wichtig für normale Bot-Befehle
+    await bot.process_commands(message)
     finally:
         db.close()
 
