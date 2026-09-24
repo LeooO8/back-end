@@ -24,6 +24,7 @@ import httpx
 import jwt
 import uuid
 import discord
+from wissen import suche_antwort
 from PIL import Image, ImageDraw, ImageFont
 from discord import app_commands
 from discord.ext import commands, tasks
@@ -2904,15 +2905,24 @@ def update_settings(guild_id: str, payload: dict, db: Session = Depends(get_db),
 def get_modules(guild_id: str, db: Session = Depends(get_db)):
     """Gibt für jedes bekannte Modul zurück, ob es auf diesem Server aktiv ist."""
     return {
-        key: {"name": name, "enabled": is_module_enabled(db, guild_id, key)}
+        key: {
+            "name": name,
+            "enabled": is_module_enabled(db, guild_id, key)
+        }
         for key, name in MODULE_NAMES.items()
     }
 
 
 @app.post("/api/modules/{module_key}")
-def update_module(module_key: str, payload: dict, guild_id: str, db: Session = Depends(get_db), user=Depends(require_guild_access)):
+def update_module(
+    module_key: str,
+    payload: dict,
+    guild_id: str,
+    db: Session = Depends(get_db),
+    user=Depends(require_guild_access)
+):
     """Schaltet ein einzelnes Modul für den Server an oder aus. Erwartet {"enabled": true/false}."""
-   if module_key not in MODULE_NAMES:
+    if module_key not in MODULE_NAMES:
         raise HTTPException(404, "Unbekanntes Modul.")
 
     enabled = bool(payload.get("enabled", True))
@@ -2931,9 +2941,14 @@ def update_module(module_key: str, payload: dict, guild_id: str, db: Session = D
         "system",
         f"{MODULE_NAMES[module_key]} wurde {'aktiviert' if enabled else 'deaktiviert'}"
     )
+
     db.commit()
 
-    return {"ok": True, "module": module_key, "enabled": enabled}
+    return {
+        "ok": True,
+        "module": module_key,
+        "enabled": enabled
+    }
 
 
 if __name__ == "__main__":
