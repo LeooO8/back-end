@@ -24,7 +24,6 @@ import httpx
 import jwt
 import uuid
 import discord
-from wissen import suche_antwort
 from PIL import Image, ImageDraw, ImageFont
 from discord import app_commands
 from discord.ext import commands, tasks
@@ -35,7 +34,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import func
 
 from database import get_db, init_db, SessionLocal
-from models import User, Transaction, ShopItem, DutyFraction, Giveaway, LogEntry, Setting, LoginSession, Ticket, Todo, Meeting, DailyStat
+from models import User, Transaction, ShopItem, DutyFraction, Giveaway, LogEntry, Setting, LoginSession, Ticket, Todo, Meeting, DailyStat, Ausweis
 
 # ---------- Konfiguration (kommt aus Umgebungsvariablen, siehe README) ----------
 DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
@@ -659,135 +658,44 @@ async def giveaway_cmd_error(interaction: discord.Interaction, error):
 async def on_message(message: discord.Message):
     if message.author.bot or not message.guild:
         return
-
     guild_id = str(message.guild.id)
 
     db = SessionLocal()
     try:
-        # Gesamt-Nachrichtenzähler
+        # Gesamt-Nachrichtenzähler hochzählen (Grundlage für die "Nachrichten"-Kachel im Dashboard)
         counter_key = gkey(guild_id, "_gesamt_nachrichten")
         counter = db.query(Setting).get(counter_key)
-
         if counter:
             counter.value = str(int(counter.value or "0") + 1)
         else:
             db.add(Setting(key=counter_key, value="1"))
-
         db.commit()
 
-        # Eigenes AFK entfernen
-        me = db.query(User).get(
-            ukey(guild_id, message.author.id)
-        )
-
+        # Eigenes AFK entfernen, sobald man wieder schreibt
+        me = db.query(User).get(ukey(guild_id, message.author.id))
         if me and me.afk_reason:
             me.afk_reason = None
             me.afk_since = None
-
-            log(
-                db,
-                guild_id,
-                "afk",
-                f"{me.username} ist nicht mehr AFK (automatisch erkannt)"
-            )
-
+            log(db, guild_id, "afk", f"{me.username} ist nicht mehr AFK (automatisch erkannt)")
             db.commit()
-
             try:
-                await message.channel.send(
-                    f"👋 Willkommen zurück, {message.author.mention}! "
-                    f"Dein AFK-Status wurde entfernt."
-                )
+                await message.channel.send(f"👋 Willkommen zurück, {message.author.mention}! Dein AFK-Status wurde entfernt.")
             except Exception:
                 pass
 
-        # Erwähnte AFK-Mitglieder melden
+        # Erwähnte Mitglieder, die AFK sind, melden
         for mentioned in message.mentions:
             if mentioned.bot or mentioned.id == message.author.id:
                 continue
-
-            target = db.query(User).get(
-                ukey(guild_id, mentioned.id)
-            )
-
+            target = db.query(User).get(ukey(guild_id, mentioned.id))
             if target and target.afk_reason:
-                dauer = (
-                    format_afk_duration(target.afk_since)
-                    if target.afk_since
-                    else ""
-                )
-
+                dauer = format_afk_duration(target.afk_since) if target.afk_since else ""
                 try:
                     await message.channel.send(
-                        f"💤 {mentioned.display_name} ist gerade AFK "
-                        f"({dauer}): {target.afk_reason}"
+                        f"💤 {mentioned.display_name} ist gerade AFK ({dauer}): {target.afk_reason}"
                     )
                 except Exception:
                     pass
-
-        # =====================================================
-        # SUPPORT-BOT / WISSENSDATENBANK
-        # =====================================================
-
-        # Prüfen, ob die Nachricht in einem offenen Ticket ist
-        ticket = db.query(Ticket).filter(
-            Ticket.guild_id == guild_id,
-            Ticket.channel_id == str(message.channel.id),
-            Ticket.status == "offen"
-        ).first()
-
-        if ticket and message.content.strip():
-
-            antwort = suche_antwort(message.content)
-
-            if antwort:
-                await message.channel.send(
-                    f"🤖 **Dresden RP Support**\n\n{antwort}"
-                )
-            else:
-                await message.channel.send(
-                    "🤖 **Dresden RP Support**\n\n"
-                    "Diese Frage kann ich momentan nicht zuverlässig "
-                    "beantworten.\n\n"
-                    "👤 Ein Mitglied des Support-Teams wird sich um "
-                    "dein Anliegen kümmern."
-                )
-
-    except Exception as e:
-        print(f"Fehler im on_message-Event: {e}")
-
-    finally:
-        db.close()
-
-    # Wichtig für normale Bot-Befehle
-    await bot.process_commands(message)
-
-
-@bot.tree.command(name="afk", description="Setzt dich auf AFK, bis du wieder schreibst")
-@app_commands.describe(grund="Warum du AFK bist (optional)")
-async def afk_cmd(interaction: discord.Interaction, grund: str = "Kein Grund angegeben"):
-    db = SessionLocal()
-    try:
-        if not is_module_enabled(db, interaction.guild_id, "afk"):
-            return await module_disabled_reply(interaction, "afk")
-
-        user = get_or_create_user(db, interaction.user)
-        user.afk_reason = grund
-        user.afk_since = datetime.now(timezone.utc)
-
-        log(
-            db,
-            str(interaction.guild_id),
-            "afk",
-            f"{user.username} ist jetzt AFK: {grund}"
-        )
-
-        db.commit()
-
-        await interaction.response.send_message(
-            f"😴 {interaction.user.mention} ist jetzt AFK: {grund}"
-        )
-
     finally:
         db.close()
 
@@ -1971,6 +1879,85 @@ async def meeting_cmd_error(interaction: discord.Interaction, error):
         await interaction.response.send_message("❌ Etwas ist schiefgelaufen.", ephemeral=True)
 
 
+# ---------- Ausweis-System ----------
+def build_ausweis_embed(a: "Ausweis | None", member: discord.Member) -> discord.Embed:
+    embed = discord.Embed(
+        title=f"🪪 Ausweis von {member.display_name}", color=BRAND_COLOR, timestamp=datetime.now(timezone.utc),
+    )
+    if not a or not any([a.name, a.alter, a.roblox_id, a.beruf]):
+        embed.description = "Noch kein Ausweis ausgefüllt. Mit `/ausweis bearbeiten` anlegen."
+        embed.set_thumbnail(url=member.display_avatar.url)
+        return embed
+    embed.add_field(name="👤 Name", value=a.name or "—", inline=True)
+    embed.add_field(name="🎂 Alter", value=a.alter or "—", inline=True)
+    embed.add_field(name="💼 Beruf", value=a.beruf or "—", inline=True)
+    embed.add_field(name="🎮 Roblox-ID", value=a.roblox_id or "—", inline=True)
+    if a.foto_url:
+        embed.set_image(url=a.foto_url)
+    else:
+        embed.set_thumbnail(url=member.display_avatar.url)
+    embed.set_footer(text=f"Zuletzt aktualisiert: {a.updated_at.strftime('%d.%m.%Y %H:%M') if a.updated_at else '—'}")
+    return embed
+
+
+ausweis_group = app_commands.Group(name="ausweis", description="RP-Ausweis")
+
+
+@ausweis_group.command(name="bearbeiten", description="Legt deinen RP-Ausweis an oder bearbeitet ihn")
+@app_commands.describe(
+    name="Dein RP-Name", alter="Dein RP-Alter", beruf="Dein Beruf/deine Fraktion (z.B. Polizist)",
+    roblox_id="Deine Roblox-ID/Nutzername", foto_url="Link zu einem Foto (optional)",
+)
+async def ausweis_edit_cmd(
+    interaction: discord.Interaction, name: str = None, alter: str = None,
+    beruf: str = None, roblox_id: str = None, foto_url: str = None,
+):
+    db = SessionLocal()
+    try:
+        guild_id = str(interaction.guild_id)
+        uid = ukey(guild_id, interaction.user.id)
+        a = db.query(Ausweis).get(uid)
+        if not a:
+            a = Ausweis(id=uid, guild_id=guild_id, discord_id=str(interaction.user.id))
+            db.add(a)
+        if name is not None:
+            a.name = name
+        if alter is not None:
+            a.alter = alter
+        if beruf is not None:
+            a.beruf = beruf
+        if roblox_id is not None:
+            a.roblox_id = roblox_id
+        if foto_url is not None:
+            a.foto_url = foto_url
+        a.updated_at = datetime.now(timezone.utc)
+        log(db, guild_id, "system", f"{interaction.user.display_name} hat seinen Ausweis aktualisiert")
+        db.commit()
+        embed = build_ausweis_embed(a, interaction.user)
+        apply_brand(embed, db, interaction.guild)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+    finally:
+        db.close()
+
+
+@ausweis_group.command(name="anzeigen", description="Zeigt deinen Ausweis oder den eines anderen Mitglieds")
+@app_commands.describe(mitglied="Wessen Ausweis angezeigt werden soll (leer = dein eigener)")
+async def ausweis_show_cmd(interaction: discord.Interaction, mitglied: discord.Member = None):
+    target = mitglied or interaction.user
+    db = SessionLocal()
+    try:
+        guild_id = str(interaction.guild_id)
+        a = db.query(Ausweis).get(ukey(guild_id, target.id))
+        embed = build_ausweis_embed(a, target)
+        apply_brand(embed, db, interaction.guild)
+        await interaction.response.send_message(embed=embed)
+    finally:
+        db.close()
+
+
+bot.tree.add_command(ausweis_group)
+
+
 async def send_announcement(guild: discord.Guild, guild_id: str, titel: str, nachricht: str, rolle: "discord.Role | None" = None) -> discord.TextChannel:
     """Baut das Ankündigungs-Embed und postet es in den eingestellten Kanal.
     Wirft ValueError, falls kein Kanal konfiguriert oder gefunden wurde."""
@@ -2258,14 +2245,17 @@ def overview(guild_id: str, db: Session = Depends(get_db)):
         oldest = getattr(history[0], key)
         return current - oldest
 
-    # Guthaben-Aufteilung nach Herkunft, direkt aus dem echten Transaktionsverlauf berechnet
+    # Guthaben-Aufteilung nach Herkunft, direkt aus dem echten Transaktionsverlauf berechnet.
+    # Startguthaben & alles nicht extra Kategorisierte wandert automatisch in "Sonstiges",
+    # damit die Summe der Segmente IMMER exakt dem echten Gesamtguthaben entspricht.
     def sum_types(types):
         return db.query(func.sum(Transaction.amount)).filter(Transaction.guild_id == guild_id, Transaction.type.in_(types)).scalar() or 0
 
     bank_volumen = sum_types(["Einzahlung", "Auszahlung", "Überweisung"])
     shop_umsatz = sum_types(["Kauf"])
     dienst_lohn = sum_types(["Dienstlohn"])
-    sonstiges = sum_types(["Arbeit", "Daily", "Admin-Gutschrift", "Admin-Abzug", "Zinsen"])
+    kategorisiert = bank_volumen + shop_umsatz + dienst_lohn
+    sonstiges = max(0, total_balance - kategorisiert)
     balance_breakdown = {"bank": bank_volumen, "shop": shop_umsatz, "dienst": dienst_lohn, "sonstiges": sonstiges}
 
     server_info = {
@@ -2770,6 +2760,20 @@ def get_meetings(guild_id: str, db: Session = Depends(get_db)):
     ]
 
 
+# ---------- Ausweise ----------
+@app.get("/api/ausweise")
+def get_ausweise(guild_id: str, db: Session = Depends(get_db)):
+    ausweise = db.query(Ausweis).filter(Ausweis.guild_id == guild_id).all()
+    return [
+        {
+            "id": a.id, "discord_id": a.discord_id, "name": a.name, "alter": a.alter,
+            "beruf": a.beruf, "roblox_id": a.roblox_id, "foto_url": a.foto_url,
+            "updated_at": a.updated_at.isoformat() if a.updated_at else None,
+        }
+        for a in ausweise if any([a.name, a.alter, a.roblox_id, a.beruf])
+    ]
+
+
 # ---------- To-Do-Liste ----------
 @app.get("/api/todos")
 def get_todos(guild_id: str, db: Session = Depends(get_db)):
@@ -2996,62 +3000,24 @@ def update_settings(guild_id: str, payload: dict, db: Session = Depends(get_db),
 def get_modules(guild_id: str, db: Session = Depends(get_db)):
     """Gibt für jedes bekannte Modul zurück, ob es auf diesem Server aktiv ist."""
     return {
-        key: {
-            "name": name,
-            "enabled": is_module_enabled(db, guild_id, key)
-        }
+        key: {"name": name, "enabled": is_module_enabled(db, guild_id, key)}
         for key, name in MODULE_NAMES.items()
     }
 
 
 @app.post("/api/modules/{module_key}")
-def update_module(
-    module_key: str,
-    payload: dict,
-    guild_id: str,
-    db: Session = Depends(get_db),
-    user=Depends(require_guild_access)
-):
+def update_module(module_key: str, payload: dict, guild_id: str, db: Session = Depends(get_db), user=Depends(require_guild_access)):
     """Schaltet ein einzelnes Modul für den Server an oder aus. Erwartet {"enabled": true/false}."""
     if module_key not in MODULE_NAMES:
         raise HTTPException(404, "Unbekanntes Modul.")
-
     enabled = bool(payload.get("enabled", True))
     full_key = gkey(guild_id, f"modul_{module_key}")
     setting = db.query(Setting).get(full_key)
     value = "ja" if enabled else "nein"
-
     if setting:
         setting.value = value
     else:
         db.add(Setting(key=full_key, value=value))
-
-    log(
-        db,
-        guild_id,
-        "system",
-        f"{MODULE_NAMES[module_key]} wurde {'aktiviert' if enabled else 'deaktiviert'}"
-    )
-
+    log(db, guild_id, "system", f"{MODULE_NAMES[module_key]} wurde {'aktiviert' if enabled else 'deaktiviert'}")
     db.commit()
-
-    return {
-        "ok": True,
-        "module": module_key,
-        "enabled": enabled
-    }
-
-
-
-if __name__ == "__main__":
-    import os
-    import uvicorn
-
-    port = int(os.getenv("PORT", "24546"))
-
-    uvicorn.run(
-        "app:app",
-        host="0.0.0.0",
-        port=port
-    )
-
+    return {"ok": True, "module": module_key, "enabled": enabled}
