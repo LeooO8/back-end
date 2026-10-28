@@ -20,6 +20,7 @@ import string
 import textwrap
 from datetime import datetime, timedelta, timezone
 from typing import Literal
+from urllib.parse import quote
 import httpx
 import jwt
 import uuid
@@ -37,12 +38,27 @@ from database import get_db, init_db, SessionLocal
 from models import User, Transaction, ShopItem, DutyFraction, Giveaway, LogEntry, Setting, LoginSession, Ticket, Todo, Meeting, DailyStat, Ausweis
 
 # ---------- Konfiguration (kommt aus Umgebungsvariablen, siehe README) ----------
+try:
+    from dotenv import load_dotenv
+    load_dotenv()  # liest zusätzlich eine .env-Datei, falls vorhanden
+except ImportError:
+    pass
+
+# >>> HIER EINMAL DEINE VERCEL-ADRESSE EINTRAGEN (ohne Schrägstrich am Ende) <<<
+DASHBOARD_URL = "https://DEINE-APP.vercel.app"
+
 DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 CLIENT_ID = os.getenv("DISCORD_CLIENT_ID")
 CLIENT_SECRET = os.getenv("DISCORD_CLIENT_SECRET")
-REDIRECT_URI = os.getenv("DISCORD_REDIRECT_URI", "http://localhost:8000/auth/callback")
-FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:24546")
+# Umgebungsvariablen haben Vorrang, sonst gilt DASHBOARD_URL von oben.
+FRONTEND_URL = os.getenv("FRONTEND_URL", DASHBOARD_URL).rstrip("/")
+REDIRECT_URI = os.getenv("DISCORD_REDIRECT_URI", f"{FRONTEND_URL}/auth/callback")
 JWT_SECRET = os.getenv("JWT_SECRET", "change-me-in-production")
+
+if "DEINE-APP" in FRONTEND_URL:
+    print("WARNUNG: DASHBOARD_URL/FRONTEND_URL ist noch nicht gesetzt - der Discord-Login funktioniert so nicht.")
+if JWT_SECRET == "change-me-in-production":
+    print("WARNUNG: JWT_SECRET ist der unsichere Standardwert - bitte als Umgebungsvariable auf Ryft setzen.")
 GUILD_ID = os.getenv("DISCORD_GUILD_ID")
 BOT_PREFIX = os.getenv("BOT_PREFIX", "!")
 DISCORD_API = "https://discord.com/api"
@@ -2028,7 +2044,7 @@ async def startup():
 @app.get("/auth/login")
 def login():
     params = (
-        f"client_id={CLIENT_ID}&redirect_uri={REDIRECT_URI}"
+        f"client_id={CLIENT_ID}&redirect_uri={quote(REDIRECT_URI, safe='')}"
         f"&response_type=code&scope=identify%20guilds.members.read"
     )
     return RedirectResponse(f"{DISCORD_API}/oauth2/authorize?{params}")
