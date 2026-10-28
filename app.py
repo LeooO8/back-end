@@ -45,7 +45,7 @@ except ImportError:
     pass
 
 # >>> HIER EINMAL DEINE VERCEL-ADRESSE EINTRAGEN (ohne Schrägstrich am Ende) <<<
-DASHBOARD_URL = "https://DEINE-APP.vercel.app"
+DASHBOARD_URL = "https://dresden-rp-dashboard-1234.vercel.app"
 
 DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 CLIENT_ID = os.getenv("DISCORD_CLIENT_ID")
